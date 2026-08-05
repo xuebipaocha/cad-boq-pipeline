@@ -6,11 +6,24 @@ __pycache__/
 # 数据库备份
 data/*.bak*
 *.bak
+data/backup_*/
 
 # 本地测试临时目录
 _test/
 _vision_*/
 _diag/
+_probe*.py
+scripts/_probe/
+scripts/_qtest/
+scripts/_fix_db_issues.py
+scripts/_*.py
+
+# 补录进度/临时数据(可重跑生成)
+data/*_progress.json
+data/pdf_pages/
+data/quota_pages/
+data/full_pages/
+data/list_scan_progress.json
 
 # 环境变量与密钥（绝不提交）
 .env
