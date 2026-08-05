@@ -1,0 +1,11 @@
+{
+  "specialty": "园林绿化工程",
+  "multi_view": true,
+  "quantities": [
+    {
+      "name": "乔木栽植",
+      "qty": 8,
+      "tolerance": 0.0
+    }
+  ]
+}

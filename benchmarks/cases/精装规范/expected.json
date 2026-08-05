@@ -1,0 +1,20 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "quantities": [
+    {
+      "name": "木地板",
+      "qty": 25.5,
+      "tolerance": 0.3
+    },
+    {
+      "name": "地砖地面",
+      "qty": 25.5,
+      "tolerance": 0.3
+    },
+    {
+      "name": "踢脚线",
+      "qty": 41.4,
+      "tolerance": 0.3
+    }
+  ]
+}

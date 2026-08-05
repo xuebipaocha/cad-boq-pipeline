@@ -1,0 +1,29 @@
+{
+  "specialty": "园林绿化工程",
+  "quantities": [
+    {
+      "name": "绿地平整",
+      "unit": "m²",
+      "qty": 1500.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "种植土回填",
+      "unit": "m³",
+      "qty": 750.0,
+      "tolerance": 0.3
+    },
+    {
+      "name": "乔木栽植",
+      "unit": "株",
+      "qty": 6,
+      "tolerance": 0.0
+    },
+    {
+      "name": "灌木栽植",
+      "unit": "株",
+      "qty": 4,
+      "tolerance": 0.0
+    }
+  ]
+}

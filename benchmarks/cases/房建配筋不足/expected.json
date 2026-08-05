@@ -1,0 +1,38 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "quantities": [
+    {
+      "name": "现浇混凝土框架柱",
+      "unit": "m³",
+      "qty": 1.62,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土梁",
+      "unit": "m³",
+      "qty": 6.91,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土板",
+      "unit": "m³",
+      "qty": 43.2,
+      "tolerance": 0.3
+    },
+    {
+      "name": "砌体墙",
+      "unit": "m³",
+      "qty": 72.0,
+      "tolerance": 0.3
+    }
+  ],
+  "components": [
+    {
+      "name": "KL1",
+      "type": "梁",
+      "qty": 1,
+      "spec": "300×480",
+      "note": "违规变体: 抗震设防 + 梁高 480mm, 高跨比 1/10.4 低于抗震下限 1/10 — 规范审查应命中"
+    }
+  ]
+}

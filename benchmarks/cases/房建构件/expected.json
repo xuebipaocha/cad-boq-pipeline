@@ -1,0 +1,45 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "quantities": [
+    {
+      "name": "现浇混凝土框架柱",
+      "unit": "m³",
+      "qty": 4.5,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土梁",
+      "unit": "m³",
+      "qty": 8.64,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土板",
+      "unit": "m³",
+      "qty": 43.2,
+      "tolerance": 0.3
+    },
+    {
+      "name": "砌体墙",
+      "unit": "m³",
+      "qty": 72.0,
+      "tolerance": 0.3
+    }
+  ],
+  "components": [
+    {
+      "name": "KZ1",
+      "type": "柱",
+      "qty": 1,
+      "spec": "500×500",
+      "note": "平法标注 KZ1 500×500, 6 根柱"
+    },
+    {
+      "name": "KL1",
+      "type": "梁",
+      "qty": 1,
+      "spec": "300×600",
+      "note": "平法标注 KL1(3) 300×600, 跨数3"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "specialty": "市政工程",
+  "quantities": [
+    {
+      "name": "路床整形",
+      "qty": 3200.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "20cm级配碎石下基层",
+      "qty": 640.0,
+      "tolerance": 0.2
+    }
+  ]
+}

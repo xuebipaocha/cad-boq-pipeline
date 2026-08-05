@@ -1,0 +1,23 @@
+{
+  "specialty": "市政工程",
+  "quantities": [
+    {
+      "name": "路床整形",
+      "unit": "m²",
+      "qty": 960.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "细粒式沥青混凝土",
+      "unit": "m³",
+      "qty": 38.4,
+      "tolerance": 0.2
+    },
+    {
+      "name": "水泥稳定碎石基层",
+      "unit": "m³",
+      "qty": 172.8,
+      "tolerance": 0.2
+    }
+  ]
+}

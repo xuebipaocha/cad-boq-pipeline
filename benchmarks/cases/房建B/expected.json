@@ -1,0 +1,20 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "quantities": [
+    {
+      "name": "现浇混凝土框架柱",
+      "qty": 15.55,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土板",
+      "qty": 176.64,
+      "tolerance": 0.3
+    },
+    {
+      "name": "砌体墙",
+      "qty": 294.4,
+      "tolerance": 0.3
+    }
+  ]
+}
