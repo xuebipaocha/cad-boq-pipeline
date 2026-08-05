@@ -1,0 +1,29 @@
+{
+  "specialty": "安装工程",
+  "quantities": [
+    {
+      "name": "给水_DN100",
+      "unit": "m",
+      "qty": 60.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "排水_DN150",
+      "unit": "m",
+      "qty": 60.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "阀门安装",
+      "unit": "个",
+      "qty": 4,
+      "tolerance": 0.0
+    },
+    {
+      "name": "双管荧光灯安装",
+      "unit": "套",
+      "qty": 6,
+      "tolerance": 0.0
+    }
+  ]
+}

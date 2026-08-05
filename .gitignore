@@ -1,0 +1,25 @@
+# 运行时产物
+output/
+__pycache__/
+*.pyc
+
+# 数据库备份
+data/*.bak*
+*.bak
+
+# 本地测试临时目录
+_test/
+_vision_*/
+_diag/
+
+# 环境变量与密钥（绝不提交）
+.env
+*.env
+.env.local
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 工具安装包（可重新下载）
+tools/oda/*.msi

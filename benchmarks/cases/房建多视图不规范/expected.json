@@ -1,0 +1,17 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "multi_view": true,
+  "quantities": [
+    {
+      "name": "现浇混凝土框架柱",
+      "qty": 4.5,
+      "tolerance": 0.3
+    },
+    {
+      "name": "现浇混凝土板",
+      "qty": 43.2,
+      "tolerance": 0.3,
+      "note": "v5.3 修正: 原78.12为0层图框(651m²)反推的错值, 真实板面积 360m²"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "specialty": "钢结构工程",
+  "quantities": [
+    {
+      "name": "H400×200×8×13 L=9m 钢制作安装",
+      "unit": "t",
+      "qty": 0.579,
+      "tolerance": 0.3
+    },
+    {
+      "name": "HN500×200×10×16 L=12制作安装",
+      "unit": "t",
+      "qty": 1.044,
+      "tolerance": 0.3
+    },
+    {
+      "name": "C250×80×7×11 檩条 L=6m制作安装",
+      "unit": "t",
+      "qty": 0.158,
+      "tolerance": 0.3
+    }
+  ]
+}

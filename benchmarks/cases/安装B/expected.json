@@ -1,0 +1,20 @@
+{
+  "specialty": "安装工程",
+  "quantities": [
+    {
+      "name": "喷淋_未标管径",
+      "qty": 80.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "给水_未标管径",
+      "qty": 80.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "排水_未标管径",
+      "qty": 80.0,
+      "tolerance": 0.1
+    }
+  ]
+}

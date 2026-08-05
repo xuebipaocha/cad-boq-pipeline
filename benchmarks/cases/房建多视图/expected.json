@@ -1,0 +1,16 @@
+{
+  "specialty": "房屋建筑与装饰工程",
+  "multi_view": true,
+  "quantities": [
+    {
+      "name": "现浇混凝土板",
+      "qty": 43.2,
+      "tolerance": 0.3
+    },
+    {
+      "name": "门窗安装(门窗表)",
+      "qty": 30,
+      "tolerance": 0.0
+    }
+  ]
+}

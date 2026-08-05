@@ -1,0 +1,20 @@
+{
+  "specialty": "园林绿化工程",
+  "quantities": [
+    {
+      "name": "绿地平整",
+      "qty": 6000.0,
+      "tolerance": 0.1
+    },
+    {
+      "name": "乔木栽植",
+      "qty": 11,
+      "tolerance": 0.0
+    },
+    {
+      "name": "灌木栽植",
+      "qty": 5,
+      "tolerance": 0.0
+    }
+  ]
+}

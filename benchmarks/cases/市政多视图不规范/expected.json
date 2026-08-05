@@ -1,0 +1,11 @@
+{
+  "specialty": "市政工程",
+  "multi_view": true,
+  "quantities": [
+    {
+      "name": "路床整形",
+      "qty": 960.0,
+      "tolerance": 0.1
+    }
+  ]
+}

@@ -1,0 +1,216 @@
+﻿"""Step 5: 组价 — 准确性增强版
+
+新增能力：
+- 优先使用 Step4 的清单-定额映射候选。
+- 定额匹配带置信度和复核提示。
+- 清单单位 -> 定额单位自动换算。
+- 管理费、利润、措施费各自按自身 base_calc 判断取费基数。
+- 费率专业名通过映射表查找，修复市政/安装/园林费率为0的问题。
+"""
+import sys, os, json
+sys.stdout.reconfigure(encoding='utf-8')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(BASE_DIR)
+sys.path.insert(0, BASE_DIR)
+from openpyxl import Workbook
+from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
+
+
+def _rate(info):
+    return (info.get('rate') or 0) / 100
+
+
+def _base_factor(info, db):
+    return db.base_factor_from_calc(info.get('base_calc', ''))
+
+
+def _pick_quota(item, specialty, db):
+    mapped = item.get('mapped_quotas') or []
+    if mapped:
+        q = mapped[0]
+        q['_selected_from'] = 'mapping'
+        return q
+    name = item.get('source_name') or item.get('name') or ''
+    unit = item.get('unit') or item.get('list_unit') or ''
+    quotas = db.find_quota(name, category=specialty, top_n=5, list_code=(item.get('code') if item.get('code') != '（待匹配）' else None), unit=unit)
+    q = quotas[0] if quotas else {}
+    if q:
+        q['_selected_from'] = q.get('_match_method', 'similarity')
+    return q
+
+
+def run(boq_json, output_dir):
+    print('='*50)
+    print('Step 5: 组价 — 增强取费')
+    print('='*50)
+    from pipeline import db
+
+    with open(boq_json, 'r', encoding='utf-8') as f:
+        boq_items = json.load(f)
+
+    specialty = '市政工程'
+    recog_path = os.path.join(output_dir, '识图结果.json')
+    if os.path.exists(recog_path):
+        with open(recog_path, encoding='utf-8') as f:
+            specialty = json.load(f).get('专业类型', '市政工程')
+    print(f'  专业: {specialty}')
+
+    fees = db.fee_rates_for_specialty(specialty)
+    env_info = fees['文明施工和环境保护费']
+    rainy_info = fees['雨季施工费']
+    winter_info = fees['冬季施工费']
+    mgmt_info = fees['企业管理费']
+    profit_info = fees['利润']
+    safety_rate = _rate(fees['安全施工费'])
+    reg_rate = _rate(fees['规费'])
+    vat_rate = _rate(fees['增值税'])
+
+    print(f"  管理费费率: {_rate(mgmt_info)*100:.2f}% | 来源:{mgmt_info.get('profession','')}")
+    print(f"  利润率: {_rate(profit_info)*100:.2f}% | 来源:{profit_info.get('profession','')}")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = '已组价清单'
+
+    hf = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    hft = Font(name='微软雅黑', bold=True, size=9, color='FFFFFF')
+    df = Font(name='微软雅黑', size=9)
+    bd = Border(left=Side(style='thin'),right=Side(style='thin'),top=Side(style='thin'),bottom=Side(style='thin'))
+    ca = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    headers = ['序号','项目编码','项目名称','清单单位','清单量','定额编号','定额名称','定额单位','换算后定额量','匹配分','置信度','人工费','材料费','机械费','管理费','利润','综合单价','合价','备注']
+    ws.cell(row=1,column=1,value='已组价工程量清单（增强准确性）').font = Font(name='微软雅黑', bold=True, size=14)
+    ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(headers))
+    ws.cell(row=2,column=1,value=f"专业:{specialty} | 管理费:{_rate(mgmt_info)*100:.2f}% | 利润:{_rate(profit_info)*100:.2f}% | 安全施工:{safety_rate*100:.2f}% | 规费:{reg_rate*100:.2f}% | 增值税:{vat_rate*100:.2f}%").font = Font(name='微软雅黑', size=8, color='666666')
+    ws.merge_cells(start_row=2,start_column=1,end_row=2,end_column=len(headers))
+
+    for i,h in enumerate(headers,1):
+        c=ws.cell(row=4,column=i,value=h); c.font=hft; c.fill=hf; c.alignment=ca; c.border=bd
+
+    total_labor = total_material = total_machine = total_mgmt = total_profit = total_sum = 0
+    low_conf = 0
+    r = 5
+
+    for item in boq_items:
+        name = item.get('name','')
+        source_name = item.get('source_name') or name
+        qty = item.get('qty',0) or 0
+        list_unit = db.infer_unit(source_name, item.get('unit') or item.get('list_unit') or '')
+
+        q = _pick_quota(item, specialty, db)
+        qc = q.get('quota_code','')
+        qname = q.get('item_name','')
+        quota_unit = db.infer_unit(qname, q.get('unit',''))
+        quota_qty, conv_factor, conv_note = db.quota_qty_from_list_qty(qty, list_unit, quota_unit)
+        score = q.get('_score', 0) or 0
+        confidence = q.get('_confidence', '待确认') or '待确认'
+        if score < 0.45:
+            low_conf += 1
+
+        lab = q.get('labor_cost',0) or 0
+        mat = q.get('material_cost',0) or 0
+        mach = q.get('machine_cost',0) or 0
+        base = q.get('base_price',0) or 0
+        if lab == 0 and mat == 0 and mach == 0 and base > 0:
+            lab, mat, mach = db.decompose_cost(base, q.get('category') or specialty)
+
+        mgmt_base = (lab + mach) * _base_factor(mgmt_info, db)
+        profit_base = (lab + mach) * _base_factor(profit_info, db)
+        mgmt = mgmt_base * _rate(mgmt_info)
+        prof = profit_base * _rate(profit_info)
+        unit_price = lab + mat + mach + mgmt + prof
+        total = unit_price * quota_qty
+
+        total_labor += lab * quota_qty
+        total_material += mat * quota_qty
+        total_machine += mach * quota_qty
+        total_mgmt += mgmt * quota_qty
+        total_profit += prof * quota_qty
+        total_sum += total
+
+        notes = []
+        if item.get('is_substitute'): notes.append('清单待复核')
+        if confidence in ('低','待确认'): notes.append('定额低置信度')
+        if '未换算' in conv_note or '不一致' in conv_note: notes.append(conv_note)
+        if not qc: notes.append('未匹配定额')
+        if base and (lab == 0 or mat == 0 or mach == 0): notes.append('人材机可能不完整')
+        if q.get('_selected_from') == 'mapping': notes.append('映射表匹配')
+
+        vals = [item.get('seq',''), item.get('code',''), name, list_unit, qty, qc, qname, quota_unit, round(quota_qty,4), round(score,4), confidence,
+                round(lab,2), round(mat,2), round(mach,2), round(mgmt,2), round(prof,2), round(unit_price,2), round(total,2), '；'.join(notes)]
+        for ci,v in enumerate(vals,1):
+            cell=ws.cell(row=r,column=ci,value=v); cell.font=df; cell.border=bd; cell.alignment=ca if ci not in (3,7,19) else Alignment(vertical='center', wrap_text=True)
+        r += 1
+
+    r += 1
+    ws.cell(row=r,column=1,value='分部分项合计').font=Font(name='微软雅黑', bold=True, size=10)
+    for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
+    for ci,v in [(12,round(total_labor,2)),(13,round(total_material,2)),(14,round(total_machine,2)),(15,round(total_mgmt,2)),(16,round(total_profit,2)),(18,round(total_sum,2))]:
+        ws.cell(row=r,column=ci,value=v).font=Font(name='微软雅黑', bold=True, size=9); ws.cell(row=r,column=ci).alignment=ca
+
+    base_mei_env = (total_labor + total_machine) * _base_factor(env_info, db)
+    base_mei_rainy = (total_labor + total_machine) * _base_factor(rainy_info, db)
+    base_mei_winter = (total_labor + total_machine) * _base_factor(winter_info, db)
+    # v4.0: 安全施工费基数按 fee_rates 表 base_calc 口径（税前分部分项费）, 不再无条件用总额
+    safety_base_calc = fees['安全施工费'].get('base_calc', '')
+    if '人工' in safety_base_calc or '机械' in safety_base_calc:
+        safety_base = (total_labor + total_machine) * _base_factor(fees['安全施工费'], db)
+    else:
+        safety_base = total_sum
+    safety_fee = safety_base * safety_rate
+    env_fee = base_mei_env * _rate(env_info)
+    rainy_fee = base_mei_rainy * _rate(rainy_info)
+    winter_fee = base_mei_winter * _rate(winter_info)
+    total_measures = safety_fee + env_fee + rainy_fee + winter_fee
+
+    for label, val in [('安全施工费', safety_fee), ('文明施工和环境保护费', env_fee), ('雨季施工费', rainy_fee), ('冬季施工费', winter_fee)]:
+        r += 1
+        ws.cell(row=r,column=1,value='措施项目费' if label == '安全施工费' else '').font=Font(name='微软雅黑', bold=True, size=10)
+        ws.cell(row=r,column=3,value=label).font=df
+        ws.cell(row=r,column=18,value=round(val,2)).font=df
+        for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
+
+    r += 1
+    social_fee = (total_sum + total_measures) * reg_rate
+    ws.cell(row=r,column=1,value='规费').font=Font(name='微软雅黑', bold=True, size=10)
+    ws.cell(row=r,column=3,value=f'规费({reg_rate*100:.2f}%)').font=df
+    ws.cell(row=r,column=18,value=round(social_fee,2)).font=df
+    for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
+
+    r += 1
+    taxable = total_sum + total_measures + social_fee
+    vat = taxable * vat_rate
+    ws.cell(row=r,column=1,value='税金').font=Font(name='微软雅黑', bold=True, size=10)
+    ws.cell(row=r,column=3,value=f'增值税({vat_rate*100:.2f}%)').font=df
+    ws.cell(row=r,column=18,value=round(vat,2)).font=df
+    for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
+
+    r += 1
+    grand = taxable + vat
+    ws.cell(row=r,column=1,value='总造价').font=Font(name='微软雅黑',bold=True,size=11)
+    ws.cell(row=r,column=18,value=round(grand,2)).font=Font(name='微软雅黑',bold=True,size=11)
+    for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
+
+    widths = [6,14,22,8,10,12,28,10,12,10,10,10,10,10,10,10,12,12,30]
+    for idx,w in enumerate(widths,1):
+        ws.column_dimensions[chr(64+idx) if idx<=26 else 'Z'].width = w
+
+    xlsx_path = os.path.join(output_dir, '已组价清单.xlsx')
+    wb.save(xlsx_path)
+
+    print(f'  低置信度定额: {low_conf}/{len(boq_items)} 项')
+    print(f'  分部分项费: {total_sum:,.2f}')
+    print(f'  措施项目费: {total_measures:,.2f}')
+    print(f'  规费: {social_fee:,.2f}')
+    print(f'  增值税: {vat:,.2f}')
+    print(f'  总造价: {grand:,.2f}')
+    print(f'  输出: {xlsx_path}')
+    return boq_items
+
+
+if __name__ == '__main__':
+    out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output')
+    os.makedirs(out, exist_ok=True)
+    sample = [{'seq':1,'code':'040101003','name':'细粒式沥青混凝土AC-13','unit':'m³','qty':31.38,'is_substitute':False}]
+    with open(os.path.join(out,'清单结果.json'),'w', encoding='utf-8') as f: json.dump(sample,f,ensure_ascii=False)
+    run(os.path.join(out,'清单结果.json'), out)
