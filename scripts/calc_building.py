@@ -346,8 +346,41 @@ def calc(data):
         deco_results = _parse_decoration(texts, bfa, total or bfa)
     r.extend(deco_results)
 
-    # ── 措施 ──
-    r.append({'分项名称':'综合脚手架','单位':'m²','工程量':round(bfa,2),'计算式':str(bfa),'定额编号':''})
-    r.append({'分项名称':'垂直运输','单位':'m²','工程量':round(bfa,2),'计算式':str(bfa),'定额编号':''})
+    # ── 措施 (v6.1 C方案: measure_rule_items 规则表驱动, 按专业+公式计算) ──
+    try:
+        from pipeline.db import get_liaoning_conn
+        conn = get_liaoning_conn()
+        measure_rules = conn.execute(
+            "SELECT measure_type, item_name, unit, formula, factor, applicable_specialties, note "
+            "FROM measure_rule_items ORDER BY id").fetchall()
+        conn.close()
+        specialty = data.get('专业类型', '')
+        # 公式上下文(安全求值)
+        ctx = {
+            'bfa': float(bfa or 0), 'area': float(total or 0), 'perim': float(perim or 0),
+            'floor_h': float(floor_h or 0), 'floors': float(floors or 1),
+            'con_vol': float(con_vol_total or 0), 'con_vol_total': float(con_vol_total or 0),
+            'col_count': float(col_count or 0), 'beam_count': float(beam_count or 0),
+            'beam_len': float(beam_len or 0), 'col_w': float(col_w or 0), 'col_h': float(col_h or 0),
+            'beam_w': float(beam_w or 0), 'beam_h': float(beam_h or 0),
+        }
+        import math as _m
+        for _r in measure_rules:
+            _t, _name, _unit, _formula, _factor, _specs, _note = _r
+            # 专业过滤
+            if _specs and specialty not in _specs:
+                continue
+            try:
+                _v = float(eval(_formula, {'__builtins__': {}}, dict(ctx))) * float(_factor or 1.0)
+            except Exception:
+                _v = 0.0
+            if _v <= 0 and '1' not in _formula:
+                continue
+            r.append({'分项名称': _name, '单位': _unit, '工程量': round(_v, 2),
+                     '计算式': f'{_formula}({_note})', '定额编号': '', '备注': '措施规则'})
+    except Exception as e:
+        # 回退: 原硬编码
+        r.append({'分项名称': '综合脚手架', '单位': 'm²', '工程量': round(bfa, 2), '计算式': str(bfa), '定额编号': ''})
+        r.append({'分项名称': '垂直运输', '单位': 'm²', '工程量': round(bfa, 2), '计算式': str(bfa), '定额编号': ''})
 
     return r
