@@ -109,6 +109,68 @@ def _merge_component_models(models):
     return merged
 
 
+def _merge_design_notes(views):
+    """v6.3: 多视图设计说明合并 — 材料规格/做法/工程内容 取并集。"""
+    out = {'检测到设计说明': False, '材料规格': [], '施工范围': '', '做法层次': [],
+           '工程概况': {'建筑面积': '', '层数': '', '檐高': '', '结构类型': '', '其他': []},
+           '工程内容': {'性质': '', '用途': '', '含项': [], '不含项': []}, '原文': []}
+    for v in views:
+        dn = v['数据'].get('设计说明') or {}
+        if dn.get('检测到设计说明'):
+            out['检测到设计说明'] = True
+        for s in dn.get('材料规格', []) or []:
+            if s not in out['材料规格']:
+                out['材料规格'].append(s)
+        for l in dn.get('做法层次', []) or []:
+            if l not in out['做法层次']:
+                out['做法层次'].append(l)
+        eng = dn.get('工程内容') or {}
+        if eng.get('性质') and not out['工程内容']['性质']:
+            out['工程内容']['性质'] = eng['性质']
+        if eng.get('用途') and not out['工程内容']['用途']:
+            out['工程内容']['用途'] = eng['用途']
+        for x in eng.get('含项', []) or []:
+            if x not in out['工程内容']['含项']:
+                out['工程内容']['含项'].append(x)
+        for x in eng.get('不含项', []) or []:
+            if x not in out['工程内容']['不含项']:
+                out['工程内容']['不含项'].append(x)
+        prof = dn.get('工程概况') or {}
+        for k in ('建筑面积', '层数', '檐高', '结构类型'):
+            if prof.get(k) and not out['工程概况'][k]:
+                out['工程概况'][k] = prof[k]
+        if dn.get('施工范围') and not out['施工范围']:
+            out['施工范围'] = dn['施工范围']
+    return out
+
+
+def _merge_intent(views):
+    """v6.3: 多视图设计意图合并 — 取参数推断最全者, 边界取并集。"""
+    best = None
+    for v in views:
+        it = v['数据'].get('设计意图') or {}
+        if it and (best is None or len(it.get('参数推断', [])) > len(best.get('参数推断', []))):
+            best = it
+    if not best:
+        return {}
+    out = dict(best)
+    inc, exc = [], []
+    for v in views:
+        b = (v['数据'].get('设计意图') or {}).get('算量边界', {}) or {}
+        for x in b.get('含项', []) or []:
+            if x not in inc:
+                inc.append(x)
+        for x in b.get('不含项', []) or []:
+            if x not in exc:
+                exc.append(x)
+    out['算量边界'] = dict(out.get('算量边界', {}))
+    if inc:
+        out['算量边界']['含项'] = inc
+    if exc:
+        out['算量边界']['不含项'] = exc
+    return out
+
+
 def merge_views(view_results):
     """view_results: [{名称, 数据}] → 合并结果"""
     merged = {}
@@ -184,17 +246,34 @@ def merge_views(view_results):
                 seen_t.add(t)
                 texts.append(t)
 
-    # 7. 跨图一致性告警
+    # 7. 跨图一致性告警(v6.3 A4+C5: 面积/构件数量/层高/门窗 多维度)
     notes = []
     plan_area = sum(a.get('面积_m2', 0) for a in primary['数据'].get('面积区域', []))
     for v in views:
         if v is primary:
             continue
-        other_area = sum(a.get('面积_m2', 0) for a in v['数据'].get('面积区域', []))
+        vd = v['数据']
+        other_area = sum(a.get('面积_m2', 0) for a in vd.get('面积区域', []))
         if plan_area > 0 and other_area > 0:
             ratio = other_area / plan_area
             if not (0.7 <= ratio <= 1.3) and other_area > plan_area:
                 notes.append(f'视图"{v.get("名称","")}"面积({other_area:.0f}m²)大于平面图({plan_area:.0f}m²)，疑似重复或立面投影')
+        # v6.3: 构件数量一致性(柱/梁/门窗)
+        for comp_key, cname in [('柱', '柱'), ('梁', '梁')]:
+            p_n = len(primary['数据'].get('构件模型', {}).get(comp_key, []) or [])
+            o_n = len(vd.get('构件模型', {}).get(comp_key, []) or [])
+            if p_n > 0 and o_n > 0 and o_n > p_n * 1.5:
+                notes.append(f'视图"{v.get("名称","")}"{cname}数({o_n})远超平面图({p_n})，疑似剖面/详图重复计')
+        # v6.3: 层高一致性
+        p_h = (primary['数据'].get('标高参数', {}) or {}).get('层高_m')
+        o_h = (vd.get('标高参数', {}) or {}).get('层高_m')
+        if p_h and o_h and abs(float(p_h) - float(o_h)) > 0.3:
+            notes.append(f'视图"{v.get("名称","")}"层高({o_h}m)与平面图({p_h}m)不一致')
+        # v6.3: 门窗表一致性(数量差异大)
+        p_wd = sum(int(w.get('数量', 1) or 1) for w in (primary['数据'].get('门窗') or []))
+        o_wd = sum(int(w.get('数量', 1) or 1) for w in (vd.get('门窗') or []))
+        if p_wd > 0 and o_wd > 0 and abs(o_wd - p_wd) > max(3, p_wd * 0.3):
+            notes.append(f'视图"{v.get("名称","")}"门窗数({o_wd})与平面图({p_wd})差异大，疑似统计口径不同')
 
     # v5.0: 构件尺寸推导按 layer 跨图合并(修复 dim 标注在非 primary 视图丢失)
     dim_sizes_merged = _merge_dim_sizes([v['数据'].get('构件尺寸推导', {}) for v in views])
@@ -211,7 +290,7 @@ def merge_views(view_results):
         '构造层': layers,
         '线性构件': linear_list,
         '施工说明': texts[:80],
-        '图纸问题候选': list(dict.fromkeys(sum([v['数据'].get('图纸问题候选', []) for v in views], [])))[:30],
+        '图纸问题候选': list(dict.fromkeys(sum([v['数据'].get('图纸问题候选', []) for v in views], []) + notes))[:30],
         '表格': sum([v['数据'].get('表格', []) for v in views], []),
         '标高': elevs,
         '标高参数': primary['数据'].get('标高参数', {}),
@@ -224,6 +303,12 @@ def merge_views(view_results):
         '安装信息': primary['数据'].get('安装信息', {}),
         '园林信息': primary['数据'].get('园林信息', {}),
         'CAD分析': primary['数据'].get('CAD分析'),
+        # v6.0~v6.3: 新增键合并(门窗/房间/设计说明/局部注释/设计意图)
+        '门窗': sum([v['数据'].get('门窗', []) for v in views], []),
+        '房间': sum([v['数据'].get('房间', []) for v in views], []),
+        '设计说明': _merge_design_notes(views),
+        '局部注释': sum([v['数据'].get('局部注释', []) for v in views], []),
+        '设计意图': _merge_intent(views),
         '_merge_notes': notes,
         '_multi_view': True,
     }

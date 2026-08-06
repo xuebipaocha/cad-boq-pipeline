@@ -43,6 +43,80 @@ def _detect_rooms_pid(dwg_file):
         return []
 
 
+def _parse_legends_pid(msp):
+    """v6.3 B2: 图例表解析(符号↔构件)。失败返回 []。"""
+    try:
+        if msp is None:
+            return []
+        from legend_parser import parse_legends
+        legends = parse_legends(msp)
+        if legends:
+            print(f'  图例: {len(legends)} 条')
+        return legends
+    except Exception:
+        return []
+
+
+def _extract_title_block_pid(dwg_file):
+    """v6.3 C2: 图签提取 — 图名/图号/比例(右下角图签区文字)。失败返回 {}。"""
+    try:
+        import ezdxf
+        doc = ezdxf.readfile(dwg_file)
+        msp = doc.modelspace()
+        # 收集文字(位置)
+        texts = []
+        for e in msp:
+            if e.dxftype() not in ('TEXT', 'MTEXT'):
+                continue
+            try:
+                txt = (e.dxf.text if e.dxftype() == 'TEXT' else e.text) or ''
+            except Exception:
+                continue
+            if txt.strip():
+                texts.append((txt.strip(), e.dxf.insert.x, e.dxf.insert.y))
+        if not texts:
+            return {}
+        # 图签区 = 右下角 20% 区域
+        xs = [t[1] for t in texts]
+        ys = [t[2] for t in texts]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        tb_x0 = x_min + (x_max - x_min) * 0.6
+        tb_y0 = y_min + (y_max - y_min) * 0.65
+        tb_texts = [t for t in texts if t[1] >= tb_x0 and t[2] >= tb_y0]
+        if len(tb_texts) < 3:
+            # 回退: 全图找 图名/图号 关键词
+            tb_texts = texts
+        out = {'图名': '', '图号': '', '比例': ''}
+        for t, x, y in tb_texts:
+            # 图名: 含'图'结尾的长文字(如 '一层平面图')
+            if not out['图名'] and 4 <= len(t) <= 20 and ('图' in t or '表' in t or '详' in t):
+                out['图名'] = t
+            # 图号: 形如 A-01 / 建施-01 / 图号:xxx
+            m = re.search(r'([A-Za-z\u4e00-\u9fa5]{1,4}[-－]\d{1,3})', t)
+            if m and not out['图号']:
+                out['图号'] = m.group(1)
+            # 比例: 1:100 / 1:50
+            m = re.search(r'(1\s*[:：]\s*\d{1,4})', t)
+            if m and not out['比例']:
+                out['比例'] = m.group(1)
+        return out
+    except Exception:
+        return {}
+
+
+def _extract_local_notes_pid(dwg_file):
+    """v6.3: 局部小说明提取+部位关联。失败返回 []。"""
+    try:
+        from local_notes import extract_local_notes
+        notes = extract_local_notes(dwg_file)
+        if notes:
+            print(f'  局部注释: {len(notes)} 条')
+        return notes
+    except Exception:
+        return []
+
+
 def _parse_design_notes_pid(texts):
     """v6.2: 设计说明专项解析 — 材料规格/施工范围/做法层次/工程概况。失败返回 {}。"""
     try:
@@ -385,7 +459,8 @@ def run(dwg_file, output_dir):
         '专业识别': {'置信度': sp_conf, '候选': sp_candidates},
         '工程性质': nature,  # v5.4: 新建 / 大修与改造
         '工程性质证据': nature_detail,
-        '图纸元数据': {'单位': result.get('metadata',{}).get('unit','mm'), 'insunits': insunits, '实体总数': result.get('metadata',{}).get('entity_total',0)},
+        '图纸元数据': {'单位': result.get('metadata',{}).get('unit','mm'), 'insunits': insunits, '实体总数': result.get('metadata',{}).get('entity_total',0),
+                      **(_extract_title_block_pid(dwg_file) if 'dwg_file' in dir() else {})},  # v6.3 C2: 图签(图名/图号/比例)
         '面积区域': [{'名称':'主区域','面积_m2':round(total_area,2),'周长_m':round(perimeter,2),'面积来源':area_source}] if total_area else [],
         '构造层': construction_layers,
         '线性构件': [],
@@ -396,6 +471,8 @@ def run(dwg_file, output_dir):
         '门窗': window_doors if 'window_doors' in dir() else [],  # v6.0: 门窗明细(墙扣门窗)
         '房间': _detect_rooms_pid(dwg_file),  # v6.1: 房间分区几何化(闭合区域→房间面积/周长)
         '设计说明': _parse_design_notes_pid(raw_texts),  # v6.2: 设计说明专项解析(材料规格/做法/概况)
+        '局部注释': _extract_local_notes_pid(dwg_file),  # v6.3: 局部小说明提取+部位关联
+        '图例': _parse_legends_pid(_msp),  # v6.3 B2: 图例表解析(符号↔构件)
         '标高': elevs_info,
         '标高参数': elev_params if 'elev_params' in dir() else {},
         '图块明细': blocks_detail,
@@ -403,6 +480,53 @@ def run(dwg_file, output_dir):
         '构件尺寸推导': member_sizes if 'member_sizes' in dir() else {},
         '剖面算量': section_qty if 'section_qty' in dir() else [],
     }
+
+    # v6.3 B1: 设计说明文字做法 → 构造层补充(表格做法表缺失时的兜底 + 补充)
+    try:
+        dn = pid.get('设计说明') or {}
+        for layer_info in dn.get('做法层次') or []:
+            name = layer_info.get('名称', '')
+            layers_ = layer_info.get('层次', [])
+            if not name or not layers_:
+                continue
+            # 生成构造层: 名称=部位+末层做法, 材料=末层(最具体)
+            last = layers_[-1] if layers_ else ''
+            existing_names = [l.get('名称', '') for l in (pid.get('构造层') or [])]
+            if name in existing_names:
+                continue
+            pid.setdefault('构造层', []).append({
+                '名称': f'{name} {last}', '厚度_mm': None, '材料': last,
+                '部位': name, '厚度来源': '设计说明做法',
+            })
+    except Exception:
+        pass
+
+    # v6.3 C4: 三源面积核对(图签/文字 vs 设计说明概况 vs 几何闭合) → 图纸问题候选
+    try:
+        dn = pid.get('设计说明') or {}
+        prof_area = (dn.get('工程概况') or {}).get('建筑面积')
+        if prof_area:
+            used_area = 0.0
+            for a in pid.get('面积区域', []):
+                used_area = max(used_area, float(a.get('面积_m2', 0) or 0))
+            if used_area > 0:
+                p_area = float(prof_area)
+                ratio = used_area / p_area if p_area else 0
+                if not (0.85 <= ratio <= 1.15):
+                    pid.setdefault('图纸问题候选', []).append(
+                        f'[面积核对] 设计说明建筑面积({p_area:.0f}m²)与识图采用面积({used_area:.0f}m²)差异{ratio:.0%}, 需人工确认')
+    except Exception:
+        pass
+
+    # v6.3: 设计意图推理(全局理解/算量边界/参数推断) — 依赖上方完整 pid
+    try:
+        from intent_engine import infer_design_intent
+        intent = infer_design_intent(pid)
+        if intent.get('参数推断') or intent.get('算量边界', {}).get('含拆除') is not None:
+            print(f"  设计意图: 边界[含拆除={intent['算量边界'].get('含拆除')}] 参数推断{len(intent['参数推断'])}条")
+        pid['设计意图'] = intent
+    except Exception:
+        pid['设计意图'] = {}
 
     try:
         cad = cad_analysis(dwg_file, insunits)
