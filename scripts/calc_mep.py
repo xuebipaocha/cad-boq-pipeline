@@ -7,6 +7,9 @@ v5.12 P1-3 安装深化:
 - 设备/阀门/灯具/开关插座/配电箱柜/卫生器具/消防设施 计数从构件模型消费
 - 分项名称与旧版一致(基准单调不降), 新增分系统标记(备注)
 """
+import re
+
+
 def calc(data):
     r = []
     mep = data.get('安装信息', {})
@@ -116,6 +119,26 @@ def calc(data):
     else:
         if 'SC管' in texts or 'JDG' in texts or '电线管' in texts:
             r.append({'分项名称': '电线管敷设', '单位': 'm', '工程量': 0, '计算式': '待CAD提取', '定额编号': '030901001'})
+
+    # v6.0 P4: 配线(管内穿线) — 从施工说明提取导线规格(BV/BYJ), 长度=配管长度×根数系数
+    wire_specs = []
+    for m in re.finditer(r'(BV|BYJ)[-\s]?([\d.]+)', texts):
+        spec = f'{m.group(1)}-{m.group(2)}'
+        if spec not in wire_specs:
+            wire_specs.append(spec)
+    cm_wires = cm.get('配线') or []
+    if cm_wires:
+        wire_specs = list(dict.fromkeys(wire_specs + [w.get('规格', '') for w in cm_wires if w.get('规格')]))
+    if wire_specs:
+        conduit_len = sum(float(c.get('长度_m', 0) or 0) for c in conduits) if conduits else 0
+        wires_per_conduit = 3  # 常规 3 根/管(真实工程 BV2.5 配 SC20)
+        for spec in wire_specs:
+            if not spec:
+                continue
+            wire_len = round(conduit_len * wires_per_conduit, 2) if conduit_len > 0 else 0
+            calc_expr = f'{conduit_len}×{wires_per_conduit}根(配管×根数)' if conduit_len > 0 else '待CAD提取'
+            r.append({'分项名称': f'配线{spec}', '单位': 'm', '工程量': wire_len,
+                     '计算式': calc_expr, '定额编号': '030904001'})
 
     # 配电箱 (v4.1.5: 支持 dict {名称: 数量} 与 list)
     panels = cm_counts.get('配电箱柜') or mep.get('配电箱', [])
