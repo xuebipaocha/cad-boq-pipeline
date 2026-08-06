@@ -225,6 +225,11 @@ def build_features_text(recog):
         s = str(tbl).strip()
         if s:
             parts.append(s)
+    # v6.2: 设计说明材料规格(如 800×800/300×600/C30/DN25) → 并入特征文本(供主材匹配/套定额)
+    dn = (recog or {}).get('设计说明') or {}
+    for spec in dn.get('材料规格') or []:
+        if spec.get('规格'):
+            parts.append(f"材料规格{spec['规格']}")
     return '；'.join(parts)
 
 

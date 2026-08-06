@@ -43,6 +43,19 @@ def _detect_rooms_pid(dwg_file):
         return []
 
 
+def _parse_design_notes_pid(texts):
+    """v6.2: 设计说明专项解析 — 材料规格/施工范围/做法层次/工程概况。失败返回 {}。"""
+    try:
+        from design_notes import parse_design_notes
+        notes = parse_design_notes(texts or [])
+        if notes.get('检测到设计说明') or notes.get('材料规格'):
+            specs = notes.get('材料规格', [])
+            print(f'  设计说明: {len(specs)} 个材料规格, {len(notes.get("做法层次", []))} 组做法, 概况{sum(1 for v in notes.get("工程概况", {}).values() if v)}项')
+        return notes
+    except Exception:
+        return {}
+
+
 def detect_project_nature(texts):
     """工程性质判定: 新建 / 大修与改造。
     加权打分: 大修信号(拆除/维修/更换...) vs 新建信号。
@@ -382,6 +395,7 @@ def run(dwg_file, output_dir):
         '表格': tables_info,
         '门窗': window_doors if 'window_doors' in dir() else [],  # v6.0: 门窗明细(墙扣门窗)
         '房间': _detect_rooms_pid(dwg_file),  # v6.1: 房间分区几何化(闭合区域→房间面积/周长)
+        '设计说明': _parse_design_notes_pid(raw_texts),  # v6.2: 设计说明专项解析(材料规格/做法/概况)
         '标高': elevs_info,
         '标高参数': elev_params if 'elev_params' in dir() else {},
         '图块明细': blocks_detail,
