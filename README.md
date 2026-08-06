@@ -145,6 +145,11 @@ cad-boq-pipeline/
 | v6.1 | 措施项目规则表（脚手架/模板/垂直运输 10 项）+ 房间分区几何化（闭合区域→实际分区量）|
 | v5.18 | 两段式调用（识图算量段无价格 / 组价独立触发）+ 输出仅 4 个成果 Excel（中间 JSON 自动清理）|
 
+## 🌐 托管地址
+
+- Gitee：https://gitee.com/xuebipaocha/cad-boq-pipeline
+- GitHub：https://github.com/xuebipaocha/cad-boq-pipeline
+
 ## ⚠️ 说明
 
 - 数据来自官方 PDF 重建，**含版权内容**，公开使用请注意合规
