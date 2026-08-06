@@ -20,6 +20,8 @@ FLOOR_MATERIALS = [
     (['地毯'], '地毯铺设', 'm²'),
     (['自流平'], '自流平找平', 'm²'),
     (['架空地板', '防静电地板'], '架空地板', 'm²'),
+    (['细石混凝土', '细石砼'], '细石混凝土地面', 'm²'),
+    (['水泥砂浆', '砂浆找平'], '水泥砂浆找平层', 'm²'),
 ]
 WALL_MATERIALS = [
     (['乳胶漆', '涂料'], '内墙乳胶漆', 'm²'),
@@ -173,7 +175,7 @@ def calc_decoration_detail(data, total_area, perim=None):
         name = l.get('名称', '') or ''
         mat = l.get('材料', '') or ''
         combined = name + ' ' + mat
-        if any(k in combined for k in ['地面', '地板', '地砖', '石材', '地毯', '自流平', '架空']):
+        if any(k in combined for k in ['地面', '地板', '地砖', '石材', '地毯', '自流平', '架空', '找平', '楼面']):
             mname, unit = _match_material(combined, FLOOR_MATERIALS)
             if mname:
                 floor_mats[mname] = floor_mats.get(mname, 0) + 1

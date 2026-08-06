@@ -98,17 +98,28 @@ def ocr_fallback(dxf_path, output_dir=None):
         print(f'  ⚠ 渲染失败({e}), 尝试直接 OCR 嵌入位图')
         png = None
 
-    # 2. 优先视觉模型(识图必经视觉路径已覆盖, 这里仅文字提取)
+    # 2. 优先视觉模型(识图必经视觉路径已覆盖, 这里文字+结构化识别)
+    vision_info = {}
     try:
         from vision_query import query_vision
         if png and os.path.exists(png):
             r = query_vision(png, enable=True, prompt=(
-                '这是 CAD 图纸渲染图。请提取图中所有可见的文字标注、图名、说明文字, '
-                '逐条列出(不要翻译)。若文字模糊请说明。'))
-            if r and r.get('原始回复'):
-                texts.append(str(r['原始回复']))
-            elif r and r.get('工程类型'):
-                texts.append(str(r['工程类型']))
+                '这是 CAD 图纸渲染图(栅格扫描件)。请完成: '
+                '1) 提取图中所有可见文字标注、图名、说明文字逐条列出; '
+                '2) 判断工程类型(房屋建筑与装饰/安装/市政/园林绿化/钢结构/其他); '
+                '3) 判断主要构件或内容(如: 道路结构层/苗木/管道/墙体/设备等)。'
+                '文字模糊请说明。只输出 JSON: {"文字":["..."],"工程类型":"...","主要构件":"..."}'))
+            if r:
+                if r.get('原始回复'):
+                    texts.append(str(r['原始回复']))
+                if r.get('工程类型'):
+                    vision_info['工程类型'] = str(r['工程类型'])
+                if r.get('主要构件'):
+                    vision_info['主要构件'] = str(r['主要构件'])
+                if r.get('文字'):
+                    for t in r['文字']:
+                        if isinstance(t, str) and t.strip():
+                            texts.append(t)
     except Exception:
         pass
 
@@ -117,7 +128,9 @@ def ocr_fallback(dxf_path, output_dir=None):
         ocr_lines = windows_ocr_image(png)
         if ocr_lines:
             texts.extend(ocr_lines)
-    return texts or None
+    out = {'文字': [t for t in texts if t], '工程类型': vision_info.get('工程类型', ''),
+           '主要构件': vision_info.get('主要构件', '')}
+    return out if (out['文字'] or out['工程类型']) else None
 
 
 def main(argv=None):

@@ -22,6 +22,46 @@ def _first_float(text, pats, lo, hi, default):
                 return v
     return default
 
+
+# ── v6.0 P1: 构件扣减 — 板扣洞 / 墙扣门窗 / 梁柱扣减 ──
+
+def _deduct_slab_holes(data, bfa):
+    """板扣洞: 板洞面积(电梯井/楼梯间/设备孔洞)从板面积扣减。
+    数据来源: ①施工说明/表格中的'洞口/孔洞/电梯井/楼梯间'面积标注
+              ②构件模型板的 洞口列表(预留)
+    返回 (洞口面积_m2, 备注)。
+    """
+    texts = ' '.join(data.get('施工说明', []) or [])
+    hole_area = 0.0
+    # 说明中显式洞口面积: '洞口面积 XX m²' / '开洞 XXm2' / '电梯井 XX'
+    m = re.search(r'(?:洞口|孔洞|开洞|电梯井|楼梯间)[面积]*(?:为|:)?\s*(\d+\.?\d*)\s*m[²2]', texts)
+    if m:
+        hole_area = float(m.group(1))
+    # 表格洞口: 构件模型板带 洞口面积
+    for slab in (data.get('构件模型', {}) or {}).get('板', []) or []:
+        if slab.get('洞口面积_m2'):
+            hole_area = max(hole_area, float(slab['洞口面积_m2']))
+    if hole_area >= bfa * 0.9:
+        return 0.0, ''  # 异常: 洞口>90%面积, 视为噪声
+    if hole_area > 0:
+        return round(hole_area, 2), f'板扣洞{round(hole_area,2)}m²'
+    return 0.0, ''
+
+
+def _deduct_window_doors(data):
+    """墙扣门窗: 门窗表洞口总面积(宽×高×数量)从墙体体积扣减。
+    数据来源: pid['门窗'] (step1 门窗表解析)。
+    返回 (洞口面积_m2, 备注)。
+    """
+    wd = data.get('门窗') or []
+    if not wd:
+        return 0.0, ''
+    total = sum(float(x.get('洞口面积_m2', 0)) * int(x.get('数量', 1) or 1) for x in wd)
+    if total <= 0:
+        return 0.0, ''
+    detail = '、'.join(f"{x.get('门窗号','')}×{x.get('数量',1)}" for x in wd[:6])
+    return round(total, 2), f'墙扣门窗{round(total,2)}m²({detail})'
+
 def _sizes(elem, dim_sizes=None):
     """从构件尺寸样本提取典型截面 (宽_mm, 高_mm)
     v4.1: 键名回退 — '框架柱'→'柱', '框架梁'→'梁' 等
@@ -239,21 +279,47 @@ def calc(data):
             beam_len = dim_len / 1000 if dim_len else _first_float(tc, [r'梁长[为]?\s*(\d+\.?\d*)\s*m'], 2, 12, 4.5)
             dim_note = '标注梁长' if dim_len else ''
         vol = round(beam_count * beam_area_m2 * beam_len, 2)
+        # v6.0 P1-c: 梁柱扣减 — 梁端伸入柱内重叠体积(每根梁按两端入柱扣减)
+        deduct_note = ''
+        if col_count > 0 and col_w > 0 and col_h > 0:
+            overlap_per_beam = (min(beam_w, col_w) / 1000) * (beam_h / 1000) * (col_w / 1000)
+            overlap = round(overlap_per_beam * beam_count * 2, 3)  # 两端
+            if overlap > 0 and overlap < vol * 0.3:
+                vol = round(vol - overlap, 2)
+                if vol < 0:
+                    vol = 0.0
+                deduct_note = f'-梁柱重叠{overlap}m³'
         con_vol_total += vol
-        r.append({'分项名称':'现浇混凝土梁','单位':'m³','工程量':vol,'计算式':f'{beam_count}根×{beam_area_m2:.3f}m²(实测截面)×{beam_len}m({dim_note})','定额编号':'','备注':'CAD实测'})
+        r.append({'分项名称':'现浇混凝土梁','单位':'m³','工程量':vol,'计算式':f'{beam_count}根×{beam_area_m2:.3f}m²(实测截面)×{beam_len}m({dim_note}){deduct_note}','定额编号':'','备注':'CAD实测'})
 
-    # ── 板 ──
+    # ── 板 (v6.0: 扣洞口 — 板洞/楼梯井等) ──
     slab_vol = round(bfa * slab_thick_mm / 1000, 2)
+    hole_area, hole_note = _deduct_slab_holes(data, bfa)
+    if hole_area > 0:
+        slab_vol = round(slab_vol - hole_area * slab_thick_mm / 1000, 2)
+        if slab_vol < 0:
+            slab_vol = 0.0
+        calc_note = f'{bfa}×{slab_thick_mm}mm(实测板厚)-{hole_area}m²洞口×{slab_thick_mm}mm'
+    else:
+        calc_note = f'{bfa}×{slab_thick_mm}mm(实测板厚)'
     con_vol_total += slab_vol
-    r.append({'分项名称':'现浇混凝土板','单位':'m³','工程量':slab_vol,'计算式':f'{bfa}×{slab_thick_mm}mm(实测板厚)','定额编号':'','备注':''})
+    r.append({'分项名称':'现浇混凝土板','单位':'m³','工程量':slab_vol,'计算式':calc_note,'定额编号':'','备注':hole_note})
 
     # ── 钢筋 ──
     rebar_weight, rebar_note = _parse_rebar(texts, bfa, con_vol_total, col_h=floor_h, beam_len=beam_len)
     r.append({'分项名称':'钢筋','单位':'t','工程量':rebar_weight,'计算式':rebar_note,'定额编号':'','备注':'平法标注/配筋率'})
 
-    # ── 砌体 ──
+    # ── 砌体 (v6.0: 扣门窗洞口) ──
     wall_vol = round(bfa * wall_thick_mm / 1000, 2)
-    r.append({'分项名称':'砌体墙','单位':'m³','工程量':wall_vol,'计算式':f'{bfa}×{wall_thick_mm}mm(实测墙厚)','定额编号':'','备注':''})
+    wd_area, wd_note = _deduct_window_doors(data)
+    if wd_area > 0:
+        wall_vol = round(wall_vol - wd_area * wall_thick_mm / 1000, 2)
+        if wall_vol < 0:
+            wall_vol = 0.0
+        wall_note = f'{bfa}×{wall_thick_mm}mm(实测墙厚)-{wd_area}m²门窗洞口×{wall_thick_mm}mm'
+    else:
+        wall_note = f'{bfa}×{wall_thick_mm}mm(实测墙厚)'
+    r.append({'分项名称':'砌体墙','单位':'m³','工程量':wall_vol,'计算式':wall_note,'定额编号':'','备注':wd_note})
 
     # ── 装饰 (v4.5: 精装细分 — 按材料生成分项; v5.12: 构件模型优先; v5.15: 房间分区) ──
     try:

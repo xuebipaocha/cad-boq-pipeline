@@ -338,10 +338,13 @@ def detect_scale(msp):
 
 
 def extract_dimensions(msp):
-    """从DXF中提取标注尺寸"""
+    """从DXF中提取标注尺寸: DIMENSION 实体 + 文字型纯数字标注(TEXT)。
+    v6.0 P2: 真实图纸尺寸常为裸数字 TEXT(非 DIMENSION 实体), 一并提取。
+    """
     dims = []
     for e in msp:
-        if e.dxftype() != 'DIMENSION': continue
+        if e.dxftype() != 'DIMENSION':
+            continue
         try:
             meas = e.get_measurement()
             if meas and meas > 0:
@@ -354,6 +357,26 @@ def extract_dimensions(msp):
                 })
         except:
             pass
+    # v6.0 P2: 文字型纯数字标注(20~60000 数值范围, 排除表格内由表格解析消费)
+    try:
+        for e in msp:
+            if e.dxftype() != 'TEXT':
+                continue
+            t = (e.dxf.text or '').strip()
+            # 纯数字 且 数值合理(10~100000)
+            if not t or not t.replace('.', '').isdigit():
+                continue
+            v = float(t)
+            if not (10 <= v <= 100000):
+                continue
+            ins = e.dxf.insert
+            dims.append({
+                'layer': e.dxf.layer or '', 'measurement': round(v, 1),
+                'text': t, 'pos': (round(ins.x, 1), round(ins.y, 1)),
+                'text_dim': True,
+            })
+    except Exception:
+        pass
     return dims
 
 

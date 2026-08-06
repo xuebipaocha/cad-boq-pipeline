@@ -268,6 +268,7 @@ def run(dwg_file, output_dir):
         try:
             from table_parser import parse_tables, table_to_layers
             tables_info = parse_tables(_msp)
+            window_doors = []  # v6.0: 门窗表 → 门窗明细(墙扣门窗)
             for tb in tables_info:
                 if tb['type'] == '做法表':
                     layers_from_table = table_to_layers(tb)
@@ -275,6 +276,42 @@ def run(dwg_file, output_dir):
                         # 表格构造层优先于文字提取(表格是权威来源)
                         construction_layers = layers_from_table
                         print(f'  做法表: {len(layers_from_table)} 层 (表格优先)')
+                elif tb['type'] == '门窗表':
+                    # v6.0: 门窗表 → [{门窗号, 宽_mm, 高_mm, 数量, 洞口面积_m2}]
+                    headers = tb.get('headers', []) or []
+                    hk = {h: i for i, h in enumerate(headers)}
+                    # 定位列: 门窗号/宽/高/数量
+                    def _find_col(*names):
+                        for n in names:
+                            for h, i in hk.items():
+                                if n in h:
+                                    return i
+                        return None
+                    i_id = _find_col('门窗号', '门号', '窗号')
+                    i_w = _find_col('洞口宽', '宽')
+                    i_h = _find_col('洞口高', '高')
+                    i_n = _find_col('数量')
+                    if i_id is not None:
+                        for row in tb.get('rows', []):
+                            cells = row.get('cells', [])
+                            if len(cells) <= i_id:
+                                continue
+                            wd_id = str(cells[i_id]).strip()
+                            if not wd_id or not any(k in wd_id for k in ('M', 'C', '门', '窗')):
+                                continue
+                            try:
+                                w = float(cells[i_w]) if i_w is not None and i_w < len(cells) else 0
+                                h = float(cells[i_h]) if i_h is not None and i_h < len(cells) else 0
+                                n = int(float(cells[i_n])) if i_n is not None and i_n < len(cells) else 1
+                            except (ValueError, TypeError, IndexError):
+                                continue
+                            if w > 0 and h > 0:
+                                window_doors.append({
+                                    '门窗号': wd_id, '宽_mm': w, '高_mm': h, '数量': n,
+                                    '洞口面积_m2': round(w * h / 1e6, 4),
+                                })
+            if window_doors:
+                print(f'  门窗表: {len(window_doors)} 个门窗 (墙扣门窗用)')
         except Exception as e:
             print(f'  表格解析失败: {e}')
         # 2. 标高提取
@@ -331,6 +368,7 @@ def run(dwg_file, output_dir):
         '图纸问题候选': [n for n in result.get('validation',{}).get('notes',[])] + area_notes,
         'CAD分析': None,
         '表格': tables_info,
+        '门窗': window_doors if 'window_doors' in dir() else [],  # v6.0: 门窗明细(墙扣门窗)
         '标高': elevs_info,
         '标高参数': elev_params if 'elev_params' in dir() else {},
         '图块明细': blocks_detail,
@@ -468,9 +506,14 @@ def run(dwg_file, output_dir):
         raster, ents, imgs = is_raster_drawing(dwg_file)
         if raster:
             print(f'  ⚠ 检测到栅格化图纸(实体{ents}个), 走 OCR 兜底')
-            ocr_texts = ocr_fallback(dwg_file, output_dir)
-            if ocr_texts:
+            ocr_out = ocr_fallback(dwg_file, output_dir)
+            if ocr_out:
+                ocr_texts = ocr_out.get('文字') or [] if isinstance(ocr_out, dict) else (ocr_out or [])
                 pid['OCR文字'] = ocr_texts
+                # v6.0 P5: 栅格图视觉结构化信息(工程类型/主要构件) → 供交叉验证
+                if isinstance(ocr_out, dict):
+                    pid['OCR视觉'] = {'工程类型': ocr_out.get('工程类型', ''),
+                                    '主要构件': ocr_out.get('主要构件', '')}
                 # 补充进施工说明(供专业识别/工程性质判定消费)
                 existing = set(pid.get('施工说明', []) or [])
                 new_texts = [t for t in ocr_texts if t and t not in existing]
