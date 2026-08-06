@@ -340,6 +340,10 @@ def run(calc_json, output_dir):
     for item in calc_results:
         name = item.get('分项名称', '')
         qty = item.get('工程量', 0) or 0
+        # v6.3 C1: 施工范围外分项不进清单(标记范围外)
+        if item.get('范围外'):
+            skipped += 1
+            continue
         # v5.6: 数据来源卡口 — 待提取分项不进清单, 进待提取清单
         src = item.get('数据来源', '')
         if src == '待提取' or ('待CAD提取' in item.get('计算式','') or '待输入' in item.get('计算式','')):

@@ -37,6 +37,24 @@ SPEC_PATTERNS = [
 # ── 施工范围关键词 ──
 SCOPE_KEYWORDS = ['施工范围', '本工程', '施工内容', '本次改造', '本次施工', '工程内容',
                   '承包范围', '包含', '包括', '不含']
+# ── 工程内容/边界关键词(v6.3 B4) ──
+INCLUDE_KW = ['包含', '包括', '含', '主要内容', '施工内容']
+EXCLUDE_KW = ['不含', '不包括', '除外', '不包含', '本次不']
+NATURE_KW = {  # 工程性质 → 设计意图信号
+    '大修': ['大修', '改造', '翻新', '修缮', '维修', '拆除重建'],
+    '新建': ['新建', '新建工程', '本工程为新建'],
+    '扩建': ['扩建', '加建', '接建'],
+    '装饰': ['装饰装修', '精装修', '室内装修', '二次装修'],
+}
+PURPOSE_KW = {  # 建筑用途 → 推断设计标准
+    '住宅': ['住宅', '公寓', '宿舍', '商品房'],
+    '办公': ['办公', '写字楼', '办公楼'],
+    '商业': ['商业', '商铺', '商场', '购物'],
+    '工业': ['厂房', '车间', '仓库', '工业'],
+    '医疗': ['医院', '门诊', '医疗'],
+    '教育': ['学校', '教学楼', '教室', '幼儿园'],
+    '公共': ['体育馆', '展览', '剧院', '图书馆'],
+}
 # ── 工程概况关键词 ──
 PROFILE_KEYWORDS = ['建筑面积', '层数', '檐高', '结构类型', '抗震', '防水等级', '耐火等级',
                     '地上', '地下', '标准层', '建筑高度', '工程概况']
@@ -62,6 +80,7 @@ def parse_design_notes(texts):
         '施工范围': '',
         '做法层次': [],
         '工程概况': {'建筑面积': '', '层数': '', '檐高': '', '结构类型': '', '其他': []},
+        '工程内容': {'性质': '', '用途': '', '含项': [], '不含项': []},  # v6.3 B4
         '原文': [],
     }
     if not texts:
@@ -107,6 +126,41 @@ def parse_design_notes(texts):
                         scope_parts.append(seg)
                     break
     out['施工范围'] = '；'.join(scope_parts[:5])
+
+    # v6.3 B4: 工程内容结构化 — 性质/用途/含项/不含项(设计意图边界)
+    eng = out['工程内容']
+    # 性质
+    for nature, kws in NATURE_KW.items():
+        if any(k in joined for k in kws):
+            eng['性质'] = nature
+            break
+    # 用途
+    for purpose, kws in PURPOSE_KW.items():
+        if any(k in joined for k in kws):
+            eng['用途'] = purpose
+            break
+    # 含/不含项(逐行扫描关键词后的分句)
+    for line in texts:
+        s = str(line)
+        for kw in EXCLUDE_KW:
+            idx = s.find(kw)
+            while idx >= 0:
+                seg = s[idx + len(kw):idx + len(kw) + 40].strip().rstrip('。；;，,')
+                if seg and seg not in eng['不含项']:
+                    eng['不含项'].append(seg)
+                idx = s.find(kw, idx + len(kw))
+        for kw in INCLUDE_KW:
+            idx = s.find(kw)
+            while idx >= 0:
+                # 排除 "不含/不包括/不包含" 中的"含" (前缀否定)
+                prefix = s[max(0, idx - 1):idx]
+                if prefix in ('不',):
+                    idx = s.find(kw, idx + len(kw))
+                    continue
+                seg = s[idx + len(kw):idx + len(kw) + 40].strip().rstrip('。；;，,')
+                if seg and seg not in eng['含项'] and not any(k in seg for k in EXCLUDE_KW):
+                    eng['含项'].append(seg)
+                idx = s.find(kw, idx + len(kw))
 
     # 4. 做法层次结构化: "位置 1.xxx 2.xxx 3.xxx" 或 "1.界面剂 2.自流平 3.实木复合地板"
     layer_pattern = re.compile(r'([\u4e00-\u9fa5A-Za-z0-9]{2,12}?)((?:\d+\.[^0-9]+){2,})')

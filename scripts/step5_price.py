@@ -195,16 +195,42 @@ def _load_material_names(db):
 
 def _match_main_material(item, features_text, db):
     """从清单名+该清单项特征中匹配主材, 返回 {name, unit, price, source, spec} 或 None。
-    匹配文本: 清单名 + 该清单项特征(features, 非全图) — 避免全图特征串扰。
+    v6.3 B3: ①规格优先(特征/设计说明含 800×800/DN25/C30 → 匹配"材料名 规格")
+             ②双向主干匹配(材料名主干↔清单名, 如 '地砖 300×300' ↔ '地砖地面')。
     """
-    # 主材匹配: 最长匹配优先(材料名按长度降序, 首个命中=最具体)
-    # 特例: '水'(2字)是大量材料子串('水泥'/'水玻璃'...), 直接排除
+    import re as _re
     name_text = f"{item.get('source_name') or ''} {item.get('name') or ''}"
     feat_text = item.get('features') or ''
+    combined = name_text + ' ' + feat_text
+
+    # ① 规格优先
+    spec_pats = [r'(\d{2,4})\s*[×xX*]\s*(\d{2,4})', r'(DN\d{2,3})', r'\b(C\d{2})\b', r'\b(M\d+(?:\.\d)?)\b']
+    specs = []
+    for pat in spec_pats:
+        for m in _re.finditer(pat, combined):
+            s = m.group(0)
+            if s not in specs:
+                specs.append(s)
+    if specs:
+        for mname in _load_material_names(db):
+            if mname == '水':
+                continue
+            # 材料名含规格(如 '地砖 800×800') 且 材料主干在清单文本中
+            if any(s in mname for s in specs):
+                trunk = mname.split(' ')[0].strip()
+                if trunk and trunk in combined:
+                    try:
+                        rows = db.find_material_price(mname, top_n=1)
+                        if rows:
+                            return rows[0]
+                    except Exception:
+                        continue
+
+    # ② 双向主干匹配: 材料名在清单文本 或 材料主干(空格前)在清单文本
     for mname in _load_material_names(db):
         if mname == '水':
-            continue  # 子串污染源
-        if mname in name_text:
+            continue
+        if mname in combined:
             try:
                 rows = db.find_material_price(mname, top_n=1)
                 if rows:
@@ -212,9 +238,10 @@ def _match_main_material(item, features_text, db):
             except Exception:
                 continue
     for mname in _load_material_names(db):
-        if mname == '水' or len(mname) < 4:
+        if mname == '水':
             continue
-        if mname in feat_text:
+        trunk = mname.split(' ')[0].strip()
+        if len(trunk) >= 2 and trunk in combined:
             try:
                 rows = db.find_material_price(mname, top_n=1)
                 if rows:

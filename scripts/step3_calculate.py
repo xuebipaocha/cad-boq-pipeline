@@ -364,6 +364,21 @@ def run(input_path, output_dir):
         json.dump(pending_items, f, ensure_ascii=False, indent=2)
     with open(os.path.join(output_dir, '算量质量报告.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+    # v6.3 C1: 施工范围消费 — 设计意图"不含项"裁剪算量分项(标记范围外, 不进清单)
+    try:
+        intent = (drawing_data.get('设计意图') or {})
+        excludes = (intent.get('算量边界') or {}).get('不含项') or []
+        if excludes:
+            for it in results:
+                nm = it.get('分项名称', '')
+                for ex in excludes:
+                    if ex and ex.strip() and ex.strip() in nm:
+                        it['范围外'] = True
+                        it.setdefault('备注', '')
+                        it['备注'] = (it['备注'] + '；' if it['备注'] else '') + f'施工范围不含[{ex.strip()}]'
+                        break
+    except Exception:
+        pass
     return results
 
 
