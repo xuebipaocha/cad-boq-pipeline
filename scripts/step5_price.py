@@ -24,19 +24,153 @@ def _base_factor(info, db):
     return db.base_factor_from_calc(info.get('base_calc', ''))
 
 
-def _pick_quota(item, specialty, db):
+def _load_combos():
+    """加载多定额组合规则。"""
+    import json as _json
+    p = os.path.join(SKILL_DIR, 'data', 'quota_combos.json')
+    try:
+        with open(p, encoding='utf-8') as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+
+# v5.17: 自补定额序号(补001, 补002 ...)
+_SUPPLEMENT_SEQ = [1]
+
+
+def _find_combo_rule(name, combos):
+    """按清单分项名匹配组合规则, 返回规则dict或None。"""
+    for rule in combos.values():
+        if not isinstance(rule, dict):
+            continue
+        for kw in rule.get('匹配', []):
+            if kw in name:
+                return rule
+    return None
+
+
+def _match_conditions(sub, features_text):
+    """子目条件判定: 无条件=固定组合; 有条件=特征文本须含任一关键词。"""
+    conds = sub.get('条件') or []
+    if not conds:
+        return True
+    if not features_text:
+        return False
+    return any(c in features_text for c in conds)
+
+
+def _pick_quotas(item, specialty, db, combos, features_text=''):
+    """多定额组合: 返回 [{quota, content, note}...]。无规则时回退单定额。
+    features_text: 清单特征/做法表/施工说明合并文本, 用于子目条件判定。
+    """
+    name = item.get('source_name') or item.get('name') or ''
     mapped = item.get('mapped_quotas') or []
+    rule = _find_combo_rule(name, combos)
+    if rule:
+        subs = []
+        for sub in rule.get('子目', []):
+            if not _match_conditions(sub, features_text):
+                continue  # 特征不满足条件 → 不套该子目
+            kw = sub.get('关键词', '')
+            # 子目检索: 优先在映射候选里找, 否则按名称模糊检索
+            q = None
+            for m in mapped:
+                if kw in (m.get('item_name') or ''):
+                    q = m
+                    break
+            if not q:
+                try:
+                    # 硬约束检索: 名称必须包含关键词(避免相似度漂移)
+                    from pipeline.db import get_liaoning_conn
+                    conn = get_liaoning_conn()
+                    try:
+                        cat = db.SPECIALTY_CATEGORY.get(specialty, [specialty])
+                        cat_cond = ' OR '.join(['category LIKE ? OR sub_category LIKE ?' for _ in cat])
+                        params = []
+                        for c in cat:
+                            params.extend([f'%{c}%', f'%{c}%'])
+                        rows = conn.execute(
+                            f"SELECT * FROM quota_items WHERE item_name LIKE ? AND ({cat_cond}) AND base_price>0 LIMIT 20",
+                            (f'%{kw}%',) + tuple(params)).fetchall()
+                        borrow = False
+                    except Exception:
+                        rows = []
+                        borrow = False
+                    if not rows:
+                        # v5.17: 跨册借用 — 本专业册无合适子目时放宽到全库检索(标记"借")
+                        rows = conn.execute(
+                            "SELECT * FROM quota_items WHERE item_name LIKE ? AND base_price>0 LIMIT 20",
+                            (f'%{kw}%',)).fetchall()
+                        borrow = bool(rows)
+                    conn.close()
+                    if rows:
+                        # 取基价最高的前几个, 按名称最短优先(更接近主条目)
+                        cands = sorted(rows, key=lambda x: (len(x['item_name'] or ''), -(x['base_price'] or 0)))
+                        q = dict(cands[0])
+                        q['unit'] = db.infer_unit(q.get('item_name'), q.get('unit'))
+                        q['_score'] = 0.9
+                        q['_confidence'] = '高'
+                        q['_match_method'] = 'combo_hard'
+                        if borrow:
+                            q['_borrowed'] = True  # 跨册借用标记
+                    else:
+                        quotas = db.find_quota(kw, category=specialty, top_n=3)
+                        q = quotas[0] if quotas else None
+                except Exception:
+                    q = None
+            if q:
+                q = dict(q)
+                q['_selected_from'] = q.get('_match_method', 'combo')
+                subs.append({'quota': q, 'content': float(sub.get('含量', 1.0)),
+                             'note': sub.get('备注', '')})
+            else:
+                # v5.17: 自补定额 — 本册/跨册均无合适子目, 生成自补条目(人材机待人工补充)
+                q = {
+                    'quota_code': f'{_SUPPLEMENT_SEQ[0]:03d}',
+                    'item_name': f'{name}（自补定额）',
+                    'unit': item.get('unit') or '',
+                    'base_price': 0, 'labor_cost': 0, 'material_cost': 0, 'machine_cost': 0,
+                    '_score': 0, '_confidence': '待确认', '_match_method': 'supplement',
+                    '_supplement': True,
+                }
+                _SUPPLEMENT_SEQ[0] += 1
+                subs.append({'quota': q, 'content': float(sub.get('含量', 1.0)),
+                             'note': '自补定额，人材机待补充'})
+        if subs:
+            return subs
+    # 回退: 单定额(原逻辑)
+    q = None
     if mapped:
         q = mapped[0]
         q['_selected_from'] = 'mapping'
-        return q
-    name = item.get('source_name') or item.get('name') or ''
-    unit = item.get('unit') or item.get('list_unit') or ''
-    quotas = db.find_quota(name, category=specialty, top_n=5, list_code=(item.get('code') if item.get('code') != '（待匹配）' else None), unit=unit)
-    q = quotas[0] if quotas else {}
-    if q:
-        q['_selected_from'] = q.get('_match_method', 'similarity')
-    return q
+    else:
+        unit = item.get('unit') or item.get('list_unit') or ''
+        quotas = db.find_quota(name, category=specialty, top_n=5,
+                               list_code=(item.get('code') if item.get('code') != '（待匹配）' else None),
+                               unit=unit)
+        q = quotas[0] if quotas else {}
+        if q:
+            q['_selected_from'] = q.get('_match_method', 'similarity')
+    if not q:
+        # v5.17: 自补定额 — 无任何匹配时生成自补条目
+        q = {
+            'quota_code': f'{_SUPPLEMENT_SEQ[0]:03d}',
+            'item_name': f'{name}（自补定额）',
+            'unit': item.get('unit') or '',
+            'base_price': 0, 'labor_cost': 0, 'material_cost': 0, 'machine_cost': 0,
+            '_score': 0, '_confidence': '待确认', '_match_method': 'supplement',
+            '_supplement': True,
+        }
+        _SUPPLEMENT_SEQ[0] += 1
+        return [{'quota': q, 'content': 1.0, 'note': '自补定额，人材机待补充'}]
+    return [{'quota': q, 'content': 1.0, 'note': ''}]
+
+
+def _pick_quota(item, specialty, db):
+    """单定额回退(兼容旧调用)。"""
+    subs = _pick_quotas(item, specialty, db, {})
+    return subs[0]['quota'] if subs else {}
 
 
 def run(boq_json, output_dir):
@@ -47,6 +181,24 @@ def run(boq_json, output_dir):
 
     with open(boq_json, 'r', encoding='utf-8') as f:
         boq_items = json.load(f)
+
+    # v5.17: 特征文本(构造层+施工说明+表格) → 子目条件判定依据
+    features_text = ''
+    recog_path = os.path.join(output_dir, '识图结果.json')
+    if os.path.exists(recog_path):
+        try:
+            with open(recog_path, encoding='utf-8') as f:
+                recog = json.load(f)
+            parts = []
+            for layer in recog.get('构造层') or []:
+                parts.append(' '.join(str(layer.get(k) or '') for k in ('名称', '材料', '部位', '厚度来源')))
+            for note in recog.get('施工说明') or []:
+                parts.append(str(note))
+            for tbl in recog.get('表格') or []:
+                parts.append(str(tbl))
+            features_text = ' '.join(parts)
+        except Exception:
+            pass
 
     specialty = '市政工程'
     recog_path = os.path.join(output_dir, '识图结果.json')
@@ -97,35 +249,85 @@ def run(boq_json, output_dir):
         qty = item.get('qty',0) or 0
         list_unit = db.infer_unit(source_name, item.get('unit') or item.get('list_unit') or '')
 
-        q = _pick_quota(item, specialty, db)
-        qc = q.get('quota_code','')
-        qname = q.get('item_name','')
-        quota_unit = db.infer_unit(qname, q.get('unit',''))
-        quota_qty, conv_factor, conv_note = db.quota_qty_from_list_qty(qty, list_unit, quota_unit)
-        score = q.get('_score', 0) or 0
-        confidence = q.get('_confidence', '待确认') or '待确认'
-        if score < 0.45:
-            low_conf += 1
+        # v5.16/v5.17: 多定额组合(特征驱动: 子目条件按图纸特征判定)
+        combos = _load_combos()
+        item_ft = item.get('features_text') or features_text  # 优先 step4 同源特征
+        subs = _pick_quotas(item, specialty, db, combos, features_text=item_ft)
+        # 子目明细(供分析表)
+        sub_rows = []
+        # 汇总各子目
+        agg = {'lab': 0.0, 'mat': 0.0, 'mach': 0.0, 'mgmt': 0.0, 'prof': 0.0,
+               'qty': 0.0, 'score': 0.0, 'conf': '', 'qc': '', 'qname': '',
+               'quota_unit': '', 'conv_note': '', 'base': 0.0}
+        if not subs:
+            subs = [{'quota': {}, 'content': 1.0, 'note': '未匹配定额'}]
+        multi = len(subs) > 1
+        conv_factor = 1.0  # 首个子目换算因子(供回填)
+        for si, sub in enumerate(subs):
+            q = sub.get('quota') or {}
+            content = float(sub.get('content', 1.0))
+            qc = q.get('quota_code','')
+            qname = q.get('item_name','')
+            quota_unit = db.infer_unit(qname, q.get('unit',''))
+            quota_qty, conv_factor, conv_note = db.quota_qty_from_list_qty(qty, list_unit, quota_unit)
+            # 含量 = 换算后定额量 × 子目系数
+            sub_qty = quota_qty * content
+            score = q.get('_score', 0) or 0
+            confidence = q.get('_confidence', '待确认') or '待确认'
+            if score < 0.45:
+                low_conf += 1
 
-        lab = q.get('labor_cost',0) or 0
-        mat = q.get('material_cost',0) or 0
-        mach = q.get('machine_cost',0) or 0
-        base = q.get('base_price',0) or 0
-        if lab == 0 and mat == 0 and mach == 0 and base > 0:
-            lab, mat, mach = db.decompose_cost(base, q.get('category') or specialty)
+            lab = (q.get('labor_cost') or 0) * content
+            mat = (q.get('material_cost') or 0) * content
+            mach = (q.get('machine_cost') or 0) * content
+            base = q.get('base_price', 0) or 0
+            if lab == 0 and mat == 0 and mach == 0 and base > 0:
+                lab, mat, mach = db.decompose_cost(base, q.get('category') or specialty)
+                lab, mat, mach = lab * content, mat * content, mach * content
 
-        mgmt_base = (lab + mach) * _base_factor(mgmt_info, db)
-        profit_base = (lab + mach) * _base_factor(profit_info, db)
-        mgmt = mgmt_base * _rate(mgmt_info)
-        prof = profit_base * _rate(profit_info)
-        unit_price = lab + mat + mach + mgmt + prof
-        total = unit_price * quota_qty
+            mgmt_base = (lab + mach) * _base_factor(mgmt_info, db)
+            profit_base = (lab + mach) * _base_factor(profit_info, db)
+            mgmt = mgmt_base * _rate(mgmt_info)
+            prof = profit_base * _rate(profit_info)
+            unit_cost = lab + mat + mach + mgmt + prof  # 每清单单位成本(子目部分)
+            sub_total = unit_cost * qty
 
-        total_labor += lab * quota_qty
-        total_material += mat * quota_qty
-        total_machine += mach * quota_qty
-        total_mgmt += mgmt * quota_qty
-        total_profit += prof * quota_qty
+            agg['lab'] += lab; agg['mat'] += mat; agg['mach'] += mach
+            agg['mgmt'] += mgmt; agg['prof'] += prof
+            agg['qty'] += sub_qty
+            agg['score'] = max(agg['score'], score)
+            agg['conf'] = confidence if si == 0 else agg['conf']
+            agg['qc'] = qc if si == 0 else agg['qc']
+            agg['qname'] = qname if si == 0 else agg['qname']
+            agg['quota_unit'] = quota_unit if si == 0 else agg['quota_unit']
+            agg['conv_note'] = conv_note if si == 0 else agg['conv_note']
+            agg['base'] += base * content
+
+            sub_rows.append({
+                'quota_code': qc, 'quota_name': qname, 'quota_unit': quota_unit,
+                'content': round(content, 4), 'sub_qty': round(sub_qty, 4),
+                'labor': round(lab, 2), 'material': round(mat, 2), 'machine': round(mach, 2),
+                'mgmt_profit': round(mgmt + prof, 2),
+                'note': sub.get('note', ''),
+                'borrowed': bool(q.get('_borrowed')),
+                'supplement': bool(q.get('_supplement')),
+            })
+
+        lab, mat, mach = agg['lab'], agg['mat'], agg['mach']
+        mgmt, prof = agg['mgmt'], agg['prof']
+        quota_qty = agg['qty']
+        unit_price = agg['lab'] + agg['mat'] + agg['mach'] + agg['mgmt'] + agg['prof']
+        total = unit_price * qty
+        qc, qname, quota_unit = agg['qc'], agg['qname'], agg['quota_unit']
+        conv_note = agg['conv_note']
+        base = agg['base']
+        score, confidence = agg['score'], agg['conf']
+
+        total_labor += lab * qty
+        total_material += mat * qty
+        total_machine += mach * qty
+        total_mgmt += mgmt * qty
+        total_profit += prof * qty
         total_sum += total
 
         notes = []
@@ -134,13 +336,38 @@ def run(boq_json, output_dir):
         if '未换算' in conv_note or '不一致' in conv_note: notes.append(conv_note)
         if not qc: notes.append('未匹配定额')
         if base and (lab == 0 or mat == 0 or mach == 0): notes.append('人材机可能不完整')
-        if q.get('_selected_from') == 'mapping': notes.append('映射表匹配')
+        if multi: notes.append(f'组合{len(subs)}项定额')
+        # v5.17: 借用/自补标记
+        if any(s.get('borrowed') for s in sub_rows): notes.append('含跨册借用定额')
+        if any(s.get('supplement') for s in sub_rows): notes.append('含自补定额')
 
-        vals = [item.get('seq',''), item.get('code',''), name, list_unit, qty, qc, qname, quota_unit, round(quota_qty,4), round(score,4), confidence,
+        # v5.17: 定额编号显示前缀(借/补)
+        qc_disp = qc
+        if qc:
+            if any(s.get('borrowed') for s in sub_rows):
+                qc_disp = f'借{qc}'
+            elif any(s.get('supplement') for s in sub_rows):
+                qc_disp = f'补{qc}'
+
+        vals = [item.get('seq',''), item.get('code',''), name, list_unit, qty, qc_disp, qname, quota_unit, round(quota_qty,4), round(score,4), confidence,
                 round(lab,2), round(mat,2), round(mach,2), round(mgmt,2), round(prof,2), round(unit_price,2), round(total,2), '；'.join(notes)]
         for ci,v in enumerate(vals,1):
             cell=ws.cell(row=r,column=ci,value=v); cell.font=df; cell.border=bd; cell.alignment=ca if ci not in (3,7,19) else Alignment(vertical='center', wrap_text=True)
         r += 1
+
+        # v5.16: 组价结果回填 item → 供综合单价分析表使用
+        item['_price'] = {
+            'quota_code': qc, 'quota_name': qname, 'quota_unit': quota_unit,
+            'quota_qty': quota_qty, 'conv_factor': conv_factor, 'conv_note': conv_note,
+            'qty': qty, 'list_unit': list_unit,
+            'labor': round(lab, 2), 'material': round(mat, 2), 'machine': round(mach, 2),
+            'mgmt': round(mgmt, 2), 'profit': round(prof, 2),
+            'unit_price': round(unit_price, 2), 'total': round(total, 2),
+            'score': score, 'confidence': confidence, 'notes': notes,
+            'base_price': base or 0,
+            'multi': multi,
+            'sub_rows': sub_rows,  # 多定额子目明细(分析表逐行)
+        }
 
     r += 1
     ws.cell(row=r,column=1,value='分部分项合计').font=Font(name='微软雅黑', bold=True, size=10)
@@ -197,6 +424,13 @@ def run(boq_json, output_dir):
 
     xlsx_path = os.path.join(output_dir, '已组价清单.xlsx')
     wb.save(xlsx_path)
+
+    # v5.16: 回填价格后的清单结果写回(供综合单价分析表等下游使用)
+    try:
+        with open(boq_json, 'w', encoding='utf-8') as f:
+            json.dump(boq_items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
     print(f'  低置信度定额: {low_conf}/{len(boq_items)} 项')
     print(f'  分部分项费: {total_sum:,.2f}')

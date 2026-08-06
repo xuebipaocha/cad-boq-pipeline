@@ -82,6 +82,96 @@ def _clean_spec(spec):
     return ' '.join(parts)
 
 
+# v5.17: 分项名 → 图纸特征匹配关键词(构造层/做法表/施工说明)
+_ITEM_FEATURE_KEYWORDS = {
+    '混凝土': ['混凝土', '砼'],
+    '垫层': ['垫层'],
+    '找平': ['找平'],
+    '楼地面': ['楼地面', '地面'],
+    '墙面': ['墙面', '墙'],
+    '天棚': ['天棚', '吊顶'],
+    '乳胶漆': ['乳胶漆', '涂料'],
+    '砌体': ['砌体', '砌块', '砖'],
+    '钢筋': ['钢筋', 'Φ', 'φ', '箍筋'],
+    '模板': ['模板'],
+    '土方': ['挖', '土方'],
+    '回填': ['回填', '填'],
+    '沥青': ['沥青'],
+    '稳定': ['稳定', '水稳'],
+    '碎石': ['碎石', '级配'],
+    '透层': ['透层'],
+    '防水': ['防水'],
+    '保温': ['保温', '绝热'],
+    '涂料': ['涂料', '防火'],
+    '管道': ['管'],
+    '阀门': ['阀'],
+    '灯具': ['灯'],
+    '桥架': ['桥架'],
+    '电缆': ['电缆', '线缆'],
+}
+
+
+# v5.17: 自补清单编码 — 专业码 + 'B' + 3位序号(真实工程规则: 01B001/03B001/03B007)
+_SPEC_PREFIX = {
+    '房屋建筑与装饰工程': '01',
+    '建筑与装饰工程': '01',
+    '安装工程': '03',
+    '市政工程': '04',
+    '园林绿化工程': '05',
+    '钢结构工程': '06',
+    '给排水工程': '03',
+    '电气工程': '03',
+    '消防工程': '03',
+}
+
+
+def _make_supplement_code(specialty, name, seq):
+    """生成自补清单编码: 专业前缀+B+序号(如 03B001)。国标清单无合适项时自补。"""
+    prefix = _SPEC_PREFIX.get(specialty, '01')
+    return f'{prefix}B{seq:03d}'
+
+
+def _match_features_for_item(name, recog):
+    """v5.17: 按分项名匹配图纸中相关的做法特征(构造层/施工说明)。
+
+    返回如 '细石混凝土楼地面 40mm C20细石砼；水泥砂浆找平层 20mm 1:3水泥砂浆'
+    (仅该分项相关的做法, 而非全图)。无匹配返回空串。
+    """
+    hits = []
+    # 分项名关键词(取最长匹配优先)
+    kws = []
+    for kw, group in _ITEM_FEATURE_KEYWORDS.items():
+        if kw in name or any(g in name for g in group):
+            kws.extend(group)
+    if not kws:
+        return ''
+    # 构造层: 名称/材料含关键词
+    for layer in (recog or {}).get('构造层') or []:
+        text = ' '.join(str(layer.get(k) or '') for k in ('名称', '材料', '部位'))
+        if any(k in text for k in kws):
+            seg = []
+            for k in ('名称', '材料', '部位'):
+                v = str(layer.get(k) or '').strip()
+                if v and v not in ('无', 'None'):
+                    seg.append(v)
+            if layer.get('厚度_mm'):
+                seg.append(f"{layer['厚度_mm']}mm")
+            if seg:
+                hits.append(' '.join(seg))
+    # 施工说明: 含关键词的行
+    for note in (recog or {}).get('施工说明') or []:
+        s = str(note).strip()
+        if s and any(k in s for k in kws) and len(s) < 60:
+            hits.append(s)
+    # 去重保序
+    seen, out = set(), []
+    for h in hits:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return '；'.join(out[:4])
+
+
 def build_features_map(cm):
     """v5.2: 构件模型规格 → 清单项目特征映射。
 
@@ -99,6 +189,43 @@ def build_features_map(cm):
             for key in (name, f'{name}安装', f'{name}制作安装', f'{name}敷设'):
                 feat[key] = f'{name}: 规格 {spec}'
     return feat
+
+
+def build_features_text(recog):
+    """v5.17: 图纸做法/构造层/施工说明 → 项目特征文本(套定额依据)。
+
+    合并: 构件规格映射 + 构造层(名称/材料/厚度/部位) + 施工说明 + 表格。
+    供: ①step4 清单项目特征描述 ②step5 定额子目条件判定。
+    """
+    parts = []
+    # 构件规格(安装 DN/功率/型号 等)
+    try:
+        fm = build_features_map((recog or {}).get('构件模型', {}))
+        parts.extend(v for v in fm.values() if v)
+    except Exception:
+        pass
+    # 构造层(做法表提取): "细石混凝土楼地面 40mm C20细石砼"
+    for layer in (recog or {}).get('构造层') or []:
+        seg = []
+        for k in ('名称', '材料', '部位'):
+            v = str(layer.get(k) or '').strip()
+            if v and v not in ('无', 'None'):
+                seg.append(v)
+        if layer.get('厚度_mm'):
+            seg.append(f"{layer['厚度_mm']}mm")
+        if seg:
+            parts.append(' '.join(seg))
+    # 施工说明(做法表原文)
+    for note in (recog or {}).get('施工说明') or []:
+        s = str(note).strip()
+        if s:
+            parts.append(s)
+    # 表格(做法表结构化)
+    for tbl in (recog or {}).get('表格') or []:
+        s = str(tbl).strip()
+        if s:
+            parts.append(s)
+    return '；'.join(parts)
 
 
 def _convert_qty(qty, from_unit, to_unit):
@@ -187,16 +314,23 @@ def run(calc_json, output_dir):
 
     # v5.2: 构件模型规格 → 清单项目特征(安装 DN/功率/型号 等)
     feat_map = {}
+    recog_data = {}
+    features_text = ''
     try:
         if os.path.exists(recog_path):
             with open(recog_path, 'r', encoding='utf-8') as f:
-                feat_map = build_features_map(json.load(f).get('构件模型', {}))
+                recog_data = json.load(f)
+                feat_map = build_features_map(recog_data.get('构件模型', {}))
+                # v5.17: 完整特征文本 = 构件规格 + 构造层 + 施工说明 + 表格(套定额依据)
+                features_text = build_features_text(recog_data)
     except Exception:
         feat_map = {}
+        features_text = ''
 
     cat = SPEC_CAT.get(specialty, specialty)
     boq_items = []
     skipped = 0
+    supplement_seq = 1  # v5.17: 自补清单序号
     pending_items = []  # v5.6: 待提取分项独立交付, 不进清单
     for item in calc_results:
         name = item.get('分项名称', '')
@@ -221,26 +355,46 @@ def run(calc_json, output_dir):
         best = lst[0] if lst else {}
         score = best.get('_score', 0) or 0
         # v4.0: 匹配确认阈值 0.35→0.5, 且低置信度(0.25-0.45)必须标记待复核
+        # v5.17: 低置信度不标"待匹配"——按国标自补清单规则生成 B 类编码(专业码+B+序号)
         confident = bool(best) and score >= 0.45
-        code = best.get('item_code') if confident else ''
-        list_name = best.get('item_name') if confident else name
-        list_unit = infer_unit(list_name, best.get('unit') or calc_unit)
+        if confident:
+            code = best.get('item_code')
+            list_name = best.get('item_name')
+        else:
+            code = _make_supplement_code(specialty, name, supplement_seq)
+            supplement_seq += 1
+            list_name = name
+        list_unit = infer_unit(list_name, best.get('unit') if confident else calc_unit)
 
         # 单位换算
         final_qty, conv_factor, unit_note = _convert_qty(qty, calc_unit, list_unit)
 
-        # 定额映射
-        mapped = get_mapped_quotas(code, top_n=5) if code else []
+        # 定额映射(自补清单无国标映射, 走关键词检索)
+        mapped = get_mapped_quotas(code, top_n=5) if confident else []
 
         # v5.6: 估算分项强制标记(数据来源=估算), 统计单独走
         is_estimated = (item.get('数据来源') == '估算')
-        review_note = '' if confident else '清单低置信度匹配，需人工复核'
+        if confident:
+            review_note = ''
+        elif 'B' in (code or '') and code[:2].isdigit():
+            review_note = '国标清单无合适项，自补清单'
+        else:
+            review_note = '清单低置信度匹配，需人工复核'
         if is_estimated:
             review_note = (review_note + '；' if review_note else '') + '估算值，需核实'
 
+        # v5.17: 项目特征 = 构件规格 + 与该分项相关的构造层/做法表/施工说明
+        # (特征描述必须根据图纸完善, 供套定额判定)
+        feat_spec = feat_map.get(name, '')
+        feat_layers = _match_features_for_item(name, recog_data)
+        if feat_spec and feat_layers:
+            features = f'{feat_spec}；{feat_layers}'
+        else:
+            features = feat_spec or feat_layers or name
+
         boq_items.append({
             'seq': len(boq_items) + 1,
-            'code': code if code else '（待匹配）',
+            'code': code,
             'name': list_name or name,
             'source_name': name,
             'section': section,
@@ -250,8 +404,9 @@ def run(calc_json, output_dir):
             'original_qty': qty,
             'conv_factor': conv_factor,
             'unit_note': unit_note,
-            # v5.2: 项目特征优先取构件模型规格, 回退分项名
-            'features': feat_map.get(name, name),
+            # v5.2/v5.17: 项目特征优先取构件模型规格, 回退分项名
+            'features': features,
+            'features_text': features_text,  # v5.17: 全图特征文本(套定额条件判定)
             'is_substitute': not confident,
             'match_score': round(score, 4),
             'match_confidence': best.get('_confidence', '待确认') if best else '待确认',

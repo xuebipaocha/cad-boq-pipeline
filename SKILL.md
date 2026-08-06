@@ -35,8 +35,21 @@ description: >
 
 ```bash
 cd scripts
-python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单,组价   # 全流程
-python pipeline.py 平面.dxf 立面.dxf 剖面.dxf --steps 全流程      # 多视图
+
+# ① 识图算量段（默认，不含价格）——只出工程量清单(无价格)、工程量计算书、图纸疑问
+python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单
+
+# ② 组价段（明确要求时才调用）——在前者基础上追加组价, 出含价格清单+综合单价分析
+python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单,组价
+python pipeline.py 图纸.dxf --steps 编清单,组价              # 已有算量结果时只做清单+组价
+
+# 多视图
+python pipeline.py 平面.dxf 立面.dxf 剖面.dxf --steps 识图,审图,算量,编清单
+
+# 输出目录仅保留 Excel 成果(中间 JSON 自动清理); 调试需保留 JSON 时加 --keep-json
+python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单,组价 --keep-json
+
+# 测试
 python test_core.py && python regression_test.py                  # 测试
 python benchmark_accuracy.py                                      # 基准
 ```
@@ -45,5 +58,5 @@ python benchmark_accuracy.py                                      # 基准
 
 1. 识图必经视觉路径，视觉与几何交叉验证；视觉**永不覆盖几何**
 2. 主力用纯文本模型；视觉（qwen3.7-flash）仅识图按需调用，`VISION_OFF=1` 关闭
-3. 算量/清单/组价全为本地确定性规则（零幻觉）
-4. 价格仅保留定额价（v5.11 移除信息价）
+3. **识图算量只出不含价格的工程量清单、工程量计算表和图纸疑问；只有要求组价时才调用组价模块做定额组价**（组价是独立步骤，不会在算量段自动触发）
+4. 价格仅保留定额价（v5.11 移除信息价）；定额选取按清单项目特征驱动，本册无合适定额跨册借用（借），再无则自补定额（补）；国标清单无合适项自补清单（B类编码）
