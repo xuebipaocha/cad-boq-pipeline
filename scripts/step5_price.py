@@ -173,6 +173,80 @@ def _pick_quota(item, specialty, db):
     return subs[0]['quota'] if subs else {}
 
 
+# v5.19: 主材价格匹配 — 真实价优先(大连信息价/真实询价), 无则经验价
+_MATERIAL_NAMES_CACHE = None
+
+
+def _load_material_names(db):
+    """加载价目表全部材料名(缓存, 按长度降序)。"""
+    global _MATERIAL_NAMES_CACHE
+    if _MATERIAL_NAMES_CACHE is None:
+        try:
+            from pipeline.db import get_liaoning_conn
+            conn = get_liaoning_conn()
+            names = [r[0] for r in conn.execute(
+                "SELECT material_name FROM material_prices ORDER BY LENGTH(material_name) DESC")]
+            conn.close()
+            _MATERIAL_NAMES_CACHE = [n for n in names if n and len(n) >= 2]
+        except Exception:
+            _MATERIAL_NAMES_CACHE = []
+    return _MATERIAL_NAMES_CACHE
+
+
+def _match_main_material(item, features_text, db):
+    """从清单名+该清单项特征中匹配主材, 返回 {name, unit, price, source, spec} 或 None。
+    匹配文本: 清单名 + 该清单项特征(features, 非全图) — 避免全图特征串扰。
+    """
+    # 主材匹配: 最长匹配优先(材料名按长度降序, 首个命中=最具体)
+    # 特例: '水'(2字)是大量材料子串('水泥'/'水玻璃'...), 直接排除
+    name_text = f"{item.get('source_name') or ''} {item.get('name') or ''}"
+    feat_text = item.get('features') or ''
+    for mname in _load_material_names(db):
+        if mname == '水':
+            continue  # 子串污染源
+        if mname in name_text:
+            try:
+                rows = db.find_material_price(mname, top_n=1)
+                if rows:
+                    return rows[0]
+            except Exception:
+                continue
+    for mname in _load_material_names(db):
+        if mname == '水' or len(mname) < 4:
+            continue
+        if mname in feat_text:
+            try:
+                rows = db.find_material_price(mname, top_n=1)
+                if rows:
+                    return rows[0]
+            except Exception:
+                continue
+    return None
+
+
+def _material_price_of(item, features_text, db, qty=1.0):
+    """主材计价: 返回 {main_material, main_price, main_unit, main_source, dim_ok} —
+    main_price = 单价(每主材单位)。dim_ok = 主材单位与清单单位维度是否一致:
+    一致(如 m3→m3)才计入综合单价; 不一致(如 t→m3)标注待人工补含量, 不计入。
+    真实价优先(find_material_price 已含 dalian/real_boq/experience 全部来源)。
+    """
+    m = _match_main_material(item, features_text, db)
+    if not m:
+        return {'main_material': '', 'main_price': 0.0, 'main_unit': '', 'main_source': '', 'dim_ok': False}
+    # 单位维度判断
+    dim_ok = False
+    try:
+        list_unit = item.get('unit') or ''
+        d1 = db.unit_dimension(m.get('unit', ''))
+        d2 = db.unit_dimension(list_unit)
+        dim_ok = bool(d1 and d2 and d1 == d2)
+    except Exception:
+        dim_ok = False
+    return {'main_material': m['material_name'], 'main_price': float(m['price']),
+            'main_unit': m.get('unit', ''), 'main_source': m.get('source', ''),
+            'dim_ok': dim_ok}
+
+
 def run(boq_json, output_dir):
     print('='*50)
     print('Step 5: 组价 — 增强取费')
@@ -323,6 +397,15 @@ def run(boq_json, output_dir):
         base = agg['base']
         score, confidence = agg['score'], agg['conf']
 
+        # v5.19: 主材价格计入(真实价优先, 无则经验价) — 单位维度一致才计入综合单价
+        mp = _material_price_of(item, item_ft, db, qty)
+        main_mat = mp['main_material']
+        main_price = mp['main_price']
+        if main_price > 0 and mp['dim_ok']:
+            mat += main_price
+            unit_price += main_price
+            total += main_price * qty
+
         total_labor += lab * qty
         total_material += mat * qty
         total_machine += mach * qty
@@ -340,6 +423,13 @@ def run(boq_json, output_dir):
         # v5.17: 借用/自补标记
         if any(s.get('borrowed') for s in sub_rows): notes.append('含跨册借用定额')
         if any(s.get('supplement') for s in sub_rows): notes.append('含自补定额')
+        # v5.19: 主材标记
+        if main_mat:
+            src_txt = {'dalian': '大连信息价', 'real_boq': '真实询价', 'experience': '经验价'}.get(mp['main_source'], mp['main_source'])
+            if mp['dim_ok']:
+                notes.append(f'主材[{main_mat[:20]} {main_price:.2f}/{mp["main_unit"] or "-"}({src_txt})]')
+            else:
+                notes.append(f'主材[{main_mat[:20]} {main_price:.2f}/{mp["main_unit"] or "-"}({src_txt})]待补含量')
 
         # v5.17: 定额编号显示前缀(借/补)
         qc_disp = qc
@@ -367,6 +457,11 @@ def run(boq_json, output_dir):
             'base_price': base or 0,
             'multi': multi,
             'sub_rows': sub_rows,  # 多定额子目明细(分析表逐行)
+            # v5.19: 主材(未计价材料)
+            'main_material': main_mat,
+            'main_price': round(main_price, 2),
+            'main_unit': mp['main_unit'],
+            'main_source': mp['main_source'],
         }
 
     r += 1
