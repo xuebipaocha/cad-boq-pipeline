@@ -159,8 +159,11 @@ def fill_boq_template(boq_items, template_path, output_path):
                 _set(r, 13, round(sum(s.get('machine', 0) for s in sub_rows), 2))
                 _set(r, 14, round(sum(s.get('mgmt_profit', 0) for s in sub_rows), 2))
                 r += 1
-                # 未计价材料费
-                _set(r, 1, "未计价材料费", bfont); _set(r, 10, 0); r += 1
+                # 未计价材料费(v5.19: 显示主材价)
+                _set(r, 1, "未计价材料费", bfont)
+                _set(r, 10, p.get('main_price', 0) or 0)
+                _set(r, 2, p.get('main_material', ''))
+                r += 1
                 # 清单项目综合单价 = 小计合计(每清单单位)
                 comp = p.get('unit_price', 0) or 0
                 _set(r, 1, "清单项目综合单价", bfont); _set(r, 10, comp, bfont)
@@ -184,8 +187,11 @@ def fill_boq_template(boq_items, template_path, output_path):
                 _set(r, 10, round(lab * content, 2)); _set(r, 11, round(mat * content, 2))
                 _set(r, 13, round(mach * content, 2)); _set(r, 14, round(mgmt_profit * content, 2))
                 r += 1
-                # 未计价材料费
-                _set(r, 1, "未计价材料费", bfont); _set(r, 10, 0); r += 1
+                # 未计价材料费(v5.19: 显示主材价)
+                _set(r, 1, "未计价材料费", bfont)
+                _set(r, 10, p.get('main_price', 0) or 0)
+                _set(r, 2, p.get('main_material', ''))
+                r += 1
                 # 清单项目综合单价 = 小计合计(每清单单位)
                 comp = round(lab * content + mat * content + mach * content + mgmt_profit * content, 2)
                 _set(r, 1, "清单项目综合单价", bfont); _set(r, 10, comp, bfont)

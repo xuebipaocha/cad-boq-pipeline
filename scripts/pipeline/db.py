@@ -171,8 +171,11 @@ NAME_UNIT_HINTS = [
 
 UNIT_BASE = {
     '1000m²': ('area', 1000.0), '1000m³': ('volume', 1000.0),
+    '1000m2': ('area', 1000.0), '1000m3': ('volume', 1000.0),
     '100m²': ('area', 100.0), 'm²': ('area', 1.0),
+    '100m2': ('area', 100.0), 'm2': ('area', 1.0),
     '10m³': ('volume', 10.0), 'm³': ('volume', 1.0),
+    '10m3': ('volume', 10.0), 'm3': ('volume', 1.0),
     '100m': ('length', 100.0), '10m': ('length', 10.0), 'm': ('length', 1.0),
     '1000m': ('length', 1000.0),
     't': ('weight', 1.0), 'kg': ('weight', 0.001),
@@ -520,3 +523,30 @@ def decompose_cost(base_price, category=None):
     if '钢' in cat:
         return base * 0.12, base * 0.78, base * 0.10
     return base * 0.20, base * 0.65, base * 0.15
+
+
+# ───────────────────────── 主材价格库(v5.19) ─────────────────────────
+
+def find_material_price(name, unit=None, top_n=3):
+    """material_prices 表主材询价: 名称模糊匹配(仅正向: 材料名包含查询词),
+    优先精确匹配/最长名称, 返回 [{material_name,unit,price,source,note}]。无匹配返回 []。"""
+    conn = get_liaoning_conn()
+    try:
+        # 精确优先
+        rows = conn.execute(
+            "SELECT material_name, unit, price, source, note FROM material_prices "
+            "WHERE material_name = ? ORDER BY price DESC LIMIT ?",
+            (name, top_n)).fetchall()
+        if not rows:
+            # 模糊(正向包含), 长名优先
+            rows = conn.execute(
+                "SELECT material_name, unit, price, source, note FROM material_prices "
+                "WHERE material_name LIKE ? ORDER BY LENGTH(material_name) DESC, price DESC LIMIT ?",
+                (f'%{name}%', top_n)).fetchall()
+        out = []
+        for r in rows:
+            out.append({'material_name': r[0], 'unit': r[1], 'price': r[2],
+                        'source': r[3], 'note': r[4]})
+        return out
+    finally:
+        conn.close()
