@@ -31,6 +31,18 @@ RENOVATION_KEYWORDS = {
 NEW_BUILD_KEYWORDS = {'新建': 3, '首建': 2, '施工图': 1}
 
 
+def _detect_rooms_pid(dwg_file):
+    """v6.1: 房间分区几何化 — 闭合区域→房间列表(面积/周长)。失败返回 []。"""
+    try:
+        from room_geometry import detect_rooms
+        rooms = detect_rooms(dwg_file)
+        if rooms:
+            print(f'  房间: {len(rooms)} 个 ({", ".join(r["房间名"] for r in rooms)})')
+        return rooms
+    except Exception:
+        return []
+
+
 def detect_project_nature(texts):
     """工程性质判定: 新建 / 大修与改造。
     加权打分: 大修信号(拆除/维修/更换...) vs 新建信号。
@@ -369,6 +381,7 @@ def run(dwg_file, output_dir):
         'CAD分析': None,
         '表格': tables_info,
         '门窗': window_doors if 'window_doors' in dir() else [],  # v6.0: 门窗明细(墙扣门窗)
+        '房间': _detect_rooms_pid(dwg_file),  # v6.1: 房间分区几何化(闭合区域→房间面积/周长)
         '标高': elevs_info,
         '标高参数': elev_params if 'elev_params' in dir() else {},
         '图块明细': blocks_detail,

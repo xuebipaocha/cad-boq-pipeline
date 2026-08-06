@@ -150,7 +150,9 @@ def calc_decoration_detail(data, total_area, perim=None):
     all_text = ' '.join([l.get('名称', '') + ' ' + (l.get('材料', '') or '') for l in layers])
     all_text += ' ' + ' '.join(texts)
 
-    # v5.15 房间分区: 做法表带'部位'列的构造层 → 按房间分组的分项(附加信息)
+    # v5.15/v6.1 房间分区: 做法表带'部位'列的构造层 → 按房间分组的分项
+    # v6.1: 用 pid['房间'](几何检测) 填充实际面积, 不再占位 0
+    geo_rooms = data.get('房间') or []  # v6.1 几何房间 [{房间名, 面积_m2, 周长_m}]
     rooms = {}
     for l in layers:
         room = (l.get('部位') or '').strip()
@@ -162,11 +164,28 @@ def calc_decoration_detail(data, total_area, perim=None):
             rooms.setdefault(room, []).append(mname)
     room_items = []
     for room, mats in sorted(rooms.items()):
+        # v6.1: 部位 ↔ 几何房间匹配(部位可能含多房间 '客厅/卧室')
+        import re as _re
+        room_names = [x.strip() for x in _re.split(r'[/、,，和及与]', room) if x.strip()]
+        matched = [g for g in geo_rooms
+                   for rn in room_names
+                   if g['房间名'] in rn or rn in g['房间名']]
+        area_total = round(sum(float(g.get('面积_m2', 0)) for g in matched), 2)
+        perim_total = round(sum(float(g.get('周长_m', 0)) for g in matched), 2)
+        # 地面量=面积; 墙面量=周长×层高(默认2.8m); 天棚量=面积
+        floor_h = float((data.get('标高参数', {}) or {}).get('层高_m') or 2.8)
         for mname in sorted(set(mats)):
+            if '墙面' in mname or '墙纸' in mname or '瓷砖' in mname and '墙面' in room:
+                qty = round(perim_total * floor_h, 2)
+                expr = f'房间周长{perim_total}m×层高{floor_h}m'
+            else:
+                qty = area_total
+                expr = f'房间面积{area_total}m²'
             room_items.append({
                 '分项名称': f'{mname}({room})', '单位': 'm²',
-                '工程量': 0, '计算式': '房间分区做法(量待几何分区)',
-                '定额编号': '', '备注': f'房间:{room}', '房间分区': True,
+                '工程量': qty, '计算式': expr,
+                '定额编号': '', '备注': f'房间:{room} 匹配:{[g["房间名"] for g in matched]}',
+                '房间分区': True,
             })
 
     # 1. 楼地面: 收集所有地面材料, 各出一个分项
