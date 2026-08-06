@@ -21,7 +21,11 @@
 - **审图规则 24 条**：编码格式 / 量纲 / 价格 / 必填字段 / 跨表一致 / 规范条文（GB 50010 等）
 - **多视图支持**：平/立/剖多张图纸自动合并去重，工程性质汇总
 - **0 量占位卡口**：算量阶段剔除占位项，独立交付待提取清单
-- **质量聚合报告**：审图/算量/清单三环节质量合一
+- **多定额组合（v5.16）**：清单项按项目特征组合多子目（如土方=挖装+运土、混凝土=浇筑+泵送），含量=单位换算×厚度/损耗系数
+- **特征驱动套定额（v5.17）**：定额子目按清单项目特征/图纸做法条件选取；特征按图纸完善（构造层/做法表/施工说明）
+- **自补机制（v5.17）**：国标清单无合适项→自补清单（B类编码）；本册无合适定额→跨册借用（借）；再无→自补定额（补）
+- **两段式调用（v5.18）**：识图算量只出无价格清单+计算书+图纸疑问；组价独立触发（--steps 追加组价）
+- **仅 Excel 输出（v5.18）**：成果文件只保留 4 个 Excel，中间 JSON 自动清理
 
 ## 📦 内置数据
 
@@ -43,11 +47,18 @@ pip install -r requirements.txt    # ezdxf, openpyxl, matplotlib
 
 cd scripts
 
-# 全流程（单图）
+# ① 识图算量段（默认，不含价格）——只出工程量清单(无价格)、工程量计算书、图纸疑问
+python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单
+
+# ② 组价段（明确要求时才调用）——追加定额组价, 出含价格清单+综合单价分析
 python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单,组价
+python pipeline.py 图纸.dxf --steps 编清单,组价   # 已有算量结果时只做清单+组价
 
 # 多视图（平立剖多张，自动合并）
-python pipeline.py 平面.dxf 立面.dxf 剖面.dxf --steps 识图,审图,算量,编清单,组价
+python pipeline.py 平面.dxf 立面.dxf 剖面.dxf --steps 识图,审图,算量,编清单
+
+# 输出目录仅保留 Excel 成果（中间 JSON 自动清理）；调试需保留 JSON 加 --keep-json
+python pipeline.py 图纸.dxf --steps 识图,审图,算量,编清单,组价 --keep-json
 
 # 指定专业 / 出渲染图
 python pipeline.py 图纸.dxf --specialty 市政工程 --render
@@ -84,17 +95,17 @@ cad-boq-pipeline/
 ├── SKILL.md               # Skill 入口
 ├── 说明文档.md             # 唯一权威完整说明（架构/能力评估/版本记录）
 ├── scripts/               # 五步流水线 + 视觉路径 + 测试
-│   ├── pipeline.py        # 调度器（--steps/QC 断言）
+│   ├── pipeline.py        # 调度器（--steps 两段式/QC 断言/中间JSON清理）
 │   ├── step1_recognize.py # 识图（+视觉路径接入）
 │   ├── step2_review.py    # 审图（24 条规则）
 │   ├── step3_calculate.py # 算量（构件模型 + 0量卡口）
-│   ├── step4_compile_boq.py  # 编清单
-│   ├── step5_price.py     # 组价（定额价）
+│   ├── step4_compile_boq.py  # 编清单（特征完善 + 自补清单 B类编码）
+│   ├── step5_price.py     # 组价（定额价 + 多定额组合 + 跨册借用/自补定额）
 │   ├── vision_fusion.py   # 视觉交叉验证（方案C二次复核）
 │   ├── vision_query.py    # 视觉识别封装（qwen3.7-flash）
 │   ├── render_dxf.py      # DXF→PNG 渲染层
 │   └── ...（42 个模块）
-├── data/                  # 定额/清单/映射/规范库
+├── data/                  # 定额/清单/映射/规范库 + quota_combos.json（组合规则）
 ├── benchmarks/cases/      # 20 个基准用例（五专业）
 ├── test_data/             # 测试图纸
 └── requirements.txt
@@ -115,12 +126,16 @@ cad-boq-pipeline/
 | v5.15.1 | 面积裁决防污染修复 |
 | v5.15.2 | 视觉重读 11 本计算标准 PDF 补录清单 unit |
 | v5.15.3 | 数据库视觉补录完成：清单 unit 94.9% / 占位名清零 / 错位名清零 / 定额基价 577→60 |
+| v5.16 | 多定额组合（组合规则表 + 综合单价分析表多行渲染）|
+| v5.17 | 特征驱动套定额（子目条件按项目特征/图纸做法）+ 自补清单（B类）+ 跨册借用/自补定额 |
+| v5.18 | 两段式调用（识图算量段无价格 / 组价独立触发）+ 输出仅 4 个成果 Excel（中间 JSON 自动清理）|
 
 ## ⚠️ 说明
 
 - 数据来自官方 PDF 重建，**含版权内容**，公开使用请注意合规
 - 清单 unit 覆盖率 94.9%（残余为 PDF 无表格页条目）、45 条幻影编码标待核、60 条定额基价为费率类（正常）——详见 `说明文档.md` 第 4 节
 - 视觉识别需自行申请阿里云百炼 API Key（`QWEN_API_KEY` 环境变量）
+- 输出成果仅 4 个 Excel（图纸问题清单 / 工程量计算书 / 分部分项工程量清单计价表 / 已组价清单）；质量聚合报告为内部质检工具（`python quality_report.py` 单独跑）
 
 ## 📄 License
 

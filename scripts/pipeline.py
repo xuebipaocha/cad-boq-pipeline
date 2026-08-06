@@ -107,6 +107,8 @@ def parse_args(argv):
     parser.add_argument('--render', action='store_true',
                         help='v5.15 V-1: 识图后渲染 DXF→PNG(整图+分层图)并写入识图结果。')
     parser.add_argument('--output-dir', default=DEFAULT_OUTPUT_DIR, help='输出目录，默认写入 skill/output。')
+    parser.add_argument('--keep-json', action='store_true',
+                        help='v5.18: 保留中间 JSON(默认清理, 仅输出 Excel 成果)。')
     parser.add_argument('--check-env', action='store_true', help='只检查依赖环境，不执行流水线。')
     return parser.parse_args(argv)
 
@@ -225,19 +227,61 @@ def main(argv=None):
     if '组价' in steps:
         run_step('5', 'step5_price', '清单结果.json', '已组价清单.xlsx', output_dir)
         qc('D', os.path.exists(os.path.join(output_dir, '已组价清单.xlsx')), '已组价清单')
+        # v5.16: 组价后用含价格数据的清单结果重新生成计价表(含综合单价分析表)
+        try:
+            from pipeline.fill_boq import fill_boq_template
+            from step4_compile_boq import TEMPLATE
+            with open(os.path.join(output_dir, '清单结果.json'), encoding='utf-8') as f:
+                priced_items = json.load(f)
+            fill_boq_template(priced_items, TEMPLATE, os.path.join(output_dir, '分部分项工程量清单计价表.xlsx'))
+        except Exception as e:
+            print(f'  ⚠ 重新生成计价表失败: {e}')
         for f in ['图纸问题清单.xlsx', '工程量计算书.xlsx', '分部分项工程量清单计价表.xlsx', '已组价清单.xlsx']:
             qc('E', os.path.exists(os.path.join(output_dir, f)), f'{f}')
 
-    # ── v5.14 工作流 P2: 质量聚合报告(三环节质量合一) ──
-    if {'审图', '算量', '编清单'} & set(steps):
-        try:
-            from quality_report import run as run_qreport
-            run_qreport(output_dir)
-        except Exception as e:
-            print(f'  ⚠ 质量聚合报告失败: {e}')
+    # ── v5.18: 质量聚合报告不再输出(内部质检, 非交付成果) ──
+    # (原 v5.14 的 quality_report 调用已移除; 需用时 python quality_report.py 单独跑)
+
+    # v5.18: 成果文件仅保留 Excel — 清理中间 JSON/质量聚合报告(流程传递用后即删)
+    if not args.keep_json:
+        _cleanup_intermediate_json(output_dir)
 
     print(f'\nQC: {QP}通过, {QW}警告')
     print(f'输出: {output_dir}')
+
+
+# v5.18: 成果文件白名单(仅 Excel), 其余中间 JSON 清理
+EXCEL_OUTPUTS = ('图纸问题清单.xlsx', '工程量计算书.xlsx', '分部分项工程量清单计价表.xlsx',
+                 '已组价清单.xlsx')
+
+
+def _cleanup_intermediate_json(output_dir):
+    """删除输出目录中的中间 JSON 与质量聚合报告, 仅保留成果 Excel。"""
+    import glob
+    removed = []
+    # 删除质量聚合报告(内部质检, 非交付成果)
+    for xf in ('质量聚合报告.xlsx', '质量聚合报告.json'):
+        p = os.path.join(output_dir, xf)
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+                removed.append(xf)
+        except Exception:
+            pass
+    for jf in glob.glob(os.path.join(output_dir, '*.json')):
+        try:
+            os.remove(jf)
+            removed.append(os.path.basename(jf))
+        except Exception:
+            pass
+    for jf in glob.glob(os.path.join(output_dir, '**', '*.json'), recursive=True):
+        try:
+            os.remove(jf)
+            removed.append(os.path.basename(jf))
+        except Exception:
+            pass
+    if removed:
+        print(f'  清理中间JSON {len(removed)} 个: {", ".join(sorted(set(removed)))}')
 
 
 if __name__ == '__main__':
