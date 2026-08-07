@@ -376,6 +376,11 @@ def run(dwg_file, output_dir):
                         construction_layers = layers_from_table
                         print(f'  做法表: {len(layers_from_table)} 层 (表格优先)')
                 elif tb['type'] == '门窗表':
+                    # v6.5: 混排表(做法+门窗号+宽高数量) — 同时解析构造层与门窗明细
+                    # (表头如 做法|厚度|材料|门窗号|洞口宽|洞口高|数量)
+                    mixed_layers = table_to_layers(tb)
+                    if mixed_layers and not layers_from_table:
+                        construction_layers = mixed_layers
                     # v6.0: 门窗表 → [{门窗号, 宽_mm, 高_mm, 数量, 洞口面积_m2}]
                     headers = tb.get('headers', []) or []
                     hk = {h: i for i, h in enumerate(headers)}
@@ -386,10 +391,12 @@ def run(dwg_file, output_dir):
                                 if n in h:
                                     return i
                         return None
-                    i_id = _find_col('门窗号', '门号', '窗号')
+                    i_id = _find_col('门窗号', '门号', '窗号', '设计编号', '编号')
                     i_w = _find_col('洞口宽', '宽')
                     i_h = _find_col('洞口高', '高')
                     i_n = _find_col('数量')
+                    # v6.4: 洞口尺寸列 '900X2100' 合并格式 → 解析宽/高
+                    i_size = _find_col('洞口尺寸', '洞口', '尺寸')
                     if i_id is not None:
                         for row in tb.get('rows', []):
                             cells = row.get('cells', [])
@@ -401,6 +408,10 @@ def run(dwg_file, output_dir):
                             try:
                                 w = float(cells[i_w]) if i_w is not None and i_w < len(cells) else 0
                                 h = float(cells[i_h]) if i_h is not None and i_h < len(cells) else 0
+                                if (w <= 0 or h <= 0) and i_size is not None and i_size < len(cells):
+                                    m = re.search(r'(\d+)\s*[xX×]\s*(\d+)', str(cells[i_size]))
+                                    if m:
+                                        w, h = float(m.group(1)), float(m.group(2))
                                 n = int(float(cells[i_n])) if i_n is not None and i_n < len(cells) else 1
                             except (ValueError, TypeError, IndexError):
                                 continue

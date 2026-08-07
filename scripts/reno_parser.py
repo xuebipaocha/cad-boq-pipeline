@@ -195,3 +195,74 @@ def parse_renovation_text(texts):
         '做法层': parse_layers(texts),
         '重做项': parse_redo_actions(texts),
     }
+
+
+# ---- v6.5: 设计范围解析(大修/翻新项目) ----
+
+# 楼层词
+FLOOR_KEYWORDS = ['一层', '二层', '三层', '四层', '五层', '六层', '顶层', '首层',
+                  '底层', '标准层', '屋面层', '夹层', '全部楼层', '各层']
+
+# 动作词(设计内容条目)
+DESIGN_ACTION_KEYWORDS = ['拆除', '更换', '重做', '新做', '翻新', '修缮', '加固',
+                          '涂刷', '重新', '修复', '增设', '外运', '安装', '贴', '铺']
+
+# 分区词(设计内容范围)
+ZONE_KEYWORDS = ['东侧', '西侧', '南侧', '北侧', '山墙', '檐口', '女儿墙', '散水',
+                 '入口', '雨篷', '外檐', '墙裙', '勒脚', '1-8', '8-15', '15-21',
+                 '1-21', 'A-C', 'C-E', 'E-G', 'A-G', '①-⑧', '⑧-⑮', '⑮-㉑',
+                 '①②', '②③', '③④', '④⑤', '⑤⑥', '⑥⑦', '⑦⑧']
+
+
+def parse_design_scope(texts):
+    """设计内容逐条解析 → [{部位, 动作, 对象, 楼层, 分区, 材料, 原文}]
+    用于大修项目: 设计说明/施工说明中的设计内容条目结构化为施工范围。"""
+    items = []
+    for t in texts or []:
+        t = str(t).strip()
+        if not t or len(t) < 4:
+            continue
+        # 跳过纯措施/规范引用行
+        if re.match(r'^(本工程|本图|本设计|图纸|说明|注|备注|做法见|详见|参见)', t):
+            continue
+        if not any(k in t for k in DESIGN_ACTION_KEYWORDS):
+            continue
+        parts = [p for p in PART_KEYWORDS if p in t]
+        objs = [o for o in OBJ_KEYWORDS if o in t]
+        mats = [m for m in MATERIAL_KEYWORDS if m in t]
+        floors = [f for f in FLOOR_KEYWORDS if f in t]
+        zones = [z for z in ZONE_KEYWORDS if z in t]
+        if not parts and not objs:
+            continue  # 无部位无对象 → 非设计内容条目
+        items.append({
+            '部位': parts[0] if parts else '',
+            '对象': objs[0] if objs else '',
+            '材料': mats[0] if mats else '',
+            '楼层': floors[0] if floors else '',
+            '分区': zones[0] if zones else '',
+            '动作': t[:40],
+            '原文': t,
+        })
+    return items
+
+
+def build_scope_mask(design_scope, calc_items):
+    """范围掩码: 算量分项是否在设计范围内。
+    分项名称含范围部位词 → 范围内(1); 否则范围外(0)。
+    返回 {'范围内': [...], '范围外': [...], 'mask': {分项名: 0/1}}"""
+    scope_parts = set()
+    for it in design_scope or []:
+        p = it.get('部位') or ''
+        o = it.get('对象') or ''
+        if p:
+            scope_parts.add(p)
+        if o and o != '墙':
+            scope_parts.add(o)
+    mask = {}
+    in_scope, out_scope = [], []
+    for it in calc_items or []:
+        name = it.get('分项名称') or it.get('name') or ''
+        hit = any(p in name for p in scope_parts if p)
+        mask[name] = 1 if hit else 0
+        (in_scope if hit else out_scope).append(name)
+    return {'范围内': in_scope, '范围外': out_scope, 'mask': mask}

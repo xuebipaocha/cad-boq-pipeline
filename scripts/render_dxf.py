@@ -92,7 +92,12 @@ def _collect_entities(msp):
             continue
     bbox = None
     if xs_all and ys_all:
-        bbox = (min(xs_all), min(ys_all), max(xs_all), max(ys_all))
+        # v6.4: bbox 用 0.5%~99.5% 分位裁剪 — 排除镜像/孤立的离群垃圾实体
+        # (如误复制的 WINDOW 块跑到 -200万坐标, 把渲染画布撑大导致视觉读图失效)
+        xs_s, ys_s = sorted(xs_all), sorted(ys_all)
+        n = len(xs_s)
+        lo, hi = max(int(n * 0.005), 1), max(int(n * 0.995), 1)
+        bbox = (xs_s[lo], ys_s[lo], xs_s[hi - 1], ys_s[hi - 1])
     return layers, bbox
 
 

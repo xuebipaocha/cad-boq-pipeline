@@ -8,7 +8,7 @@
 - 视觉结果一律带 '来源': '视觉识别', 由融合层(V-3)标"需交叉验证"
 
 用法:
-  python3 vision_query.py 渲染.png [--model qwen3.7-flash] [--task 工程类型]
+  python3 vision_query.py 渲染.png [--model qwen3-vl-flash] [--task 工程类型]
   python3 vision_query.py --batch renders/ --out vision_results.json
 """
 import os
@@ -20,7 +20,7 @@ import glob
 sys.stdout.reconfigure(encoding='utf-8')
 
 DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-DEFAULT_MODEL = 'qwen3.7-flash'
+DEFAULT_MODEL = 'qwen3-vl-flash'  # v6.5: 视觉专用模型(原 qwen3.7-flash 通用推理型, 视觉识别弱)
 
 # 视觉按需调用开关(v5.15, 用户确认工作方式):
 # 默认关闭 — 主力是纯文本语言模型(deepseek 等)走全链路, 仅显式启用视觉时调用视觉模型。
@@ -75,7 +75,8 @@ def query_vision(image_path, model=None, base_url=None, prompt=None, timeout=120
         enable = VISION_ENABLED
     if not enable:
         return None
-    model = model or DEFAULT_MODEL
+    # v6.5: 模型可配置 — 环境变量 VISION_MODEL 覆盖默认(qwen3-vl-flash)
+    model = model or os.environ.get('VISION_MODEL') or DEFAULT_MODEL
     base_url = base_url or DEFAULT_BASE_URL
     prompt = prompt or PROMPT_JSON
     key = api_key or _load_api_key()

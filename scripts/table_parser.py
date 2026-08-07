@@ -55,8 +55,12 @@ def collect_texts(msp, unit_scale_mm=1.0):
     return texts
 
 
-def cluster_rows(texts, tol_factor=1.5):
-    """按 y 聚类成行 (容差=字高×tol_factor)"""
+def cluster_rows(texts, tol_factor=2.5):
+    """按 y 聚类成行 (容差=字高×tol_factor)
+    v6.4: 容差 1.5→2.5 — 大字高图纸表格行内各列文字 y 抖动可达 2~3 倍字高,
+    1.5 会把同一表格行拆成多行(如 '楼1 | 木质地板 | 分段:办公室' 拆碎)。
+    行距(≥3 字高)仍远大于容差, 不会误合并相邻行。
+    """
     items = sorted(texts, key=lambda t: -t['y'])  # 从上到下
     rows = []
     for t in items:
@@ -99,7 +103,10 @@ def build_grid(rows, cols, x_tol=1.0):
         for t in r['items']:
             # 找最近的列
             best = min(range(len(cols)), key=lambda ci: abs(t['x'] - cols[ci]['x']))
-            if abs(t['x'] - cols[best]['x']) <= 40:
+            # v6.4: 列容差随字高自适应 — 原写死 40, 大字高图纸(如本图 h=350)
+            # 同列文字 x 抖动可达数百~上千(表格绘制不齐), 40 会把表头/数据全丢弃
+            tol = max(x_tol, t['h'] * 1.2, 1500)
+            if abs(t['x'] - cols[best]['x']) <= tol:
                 grid[ri].setdefault(best, []).append(t['text'])
     return grid
 
@@ -107,20 +114,73 @@ def build_grid(rows, cols, x_tol=1.0):
 def detect_table_type(headers):
     """表头行 → 表格类型"""
     joined = ' '.join(headers)
+    # v6.4: 表头词可能带空格(如 '构 造 做 法'), 去空格后再匹配
+    joined_nospace = joined.replace(' ', '')
+    # v6.5: 门窗表特征列(门窗号/宽/高/数量)优先 — 做法表+门窗表混排时按门窗表处理
+    # (房建多视图平面图表头: 做法|厚度|材料|门窗号|宽|高|数量 — 同时含两种特征)
+    if any(k in joined_nospace for k in ('门窗号', '门号', '窗号')) and any(k in joined_nospace for k in ('宽', '高', '数量', '洞口')):
+        return '门窗表'
+    # v6.4: 做法表特判 — '编号'+('名称'/'类别') 组合必为做法表(避免被'设备表'(名称)抢先)
+    if '编号' in joined_nospace and any(k in joined_nospace for k in ('名称', '类别', '部位', '位置')):
+        if any(k in joined_nospace for k in ('做法', '构造', '层次')):
+            return '做法表'
     for kws, ttype in HEADER_PATTERNS:
-        if any(k in joined for k in kws):
+        if any(k in joined_nospace for k in kws):
             return ttype
     return None
+
+
+def split_text_columns(texts):
+    """v6.4: 多栏排版切分 — 设计说明页常为多栏(目录栏/正文栏/做法表栏/门窗栏)横向排列,
+    全局行聚类会把不同栏的 y 相近文字拼成'混合行', 导致表格解析错乱。
+    按 x 间隙(离群阈值: 中位间隙×10 且 ≥5000 图纸单位)切分为纵向栏, 每栏独立解析。
+    单栏图纸(间隙均匀) → 仍返回整组, 行为不变。
+    """
+    if len(texts) < 8:
+        return [texts]
+    xs = sorted(t['x'] for t in texts)
+    gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+    gaps = [g for g in gaps if g > 0]
+    if not gaps:
+        return [texts]
+    gaps.sort()
+    med = gaps[len(gaps) // 2]
+    # v6.4: 保守阈值(原 max(med*10,5000) 会把列距大的表格(如做法表 编号→做法 列距 8千)误切成多栏)
+    threshold = max(med * 10, 20000)
+    xs_u = sorted(set(xs))
+    bounds = [xs_u[0]]
+    for i in range(1, len(xs_u)):
+        if xs_u[i] - xs_u[i - 1] > threshold:
+            bounds.append((xs_u[i - 1] + xs_u[i]) / 2)
+    bounds.append(xs_u[-1])
+    cols = []
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        grp = [t for t in texts if lo <= t['x'] <= hi]
+        if len(grp) >= 4:  # 栏内文字过少不成表
+            cols.append(grp)
+    return cols or [texts]
 
 
 def parse_tables(msp, unit_scale_mm=1.0):
     """主入口: 解析图纸中的所有文字表格
     v4.1.2: 支持同 y 区域多个表格(做法表+门窗表并存)
+    v6.4: 先按 x 栏分区(多栏排版), 每栏独立聚类解析
     """
     texts = collect_texts(msp, unit_scale_mm)
     if len(texts) < 4:
         return []
 
+    tables = []
+    for texts_col in split_text_columns(texts):
+        tables.extend(_parse_tables_in_column(texts_col))
+    return tables
+
+
+def _parse_tables_in_column(texts):
+    """单栏内的表格解析(原 parse_tables 主体, 抽取为独立函数)"""
+    if len(texts) < 4:
+        return []
     rows = cluster_rows(texts)
     if len(rows) < 2:
         return []
@@ -132,6 +192,9 @@ def parse_tables(msp, unit_scale_mm=1.0):
     # 找表头行: 行内含 ≥2 个不同列的文字, 且匹配表头关键词
     for ri in range(min(len(rows), len(grid))):
         cells = grid.get(ri, {})
+        # v6.4: 剔除长句列(>20字符) — 多栏排版下表头行常混入跨栏正文长句,
+        # 这些不是表头字段, 剔除后剩余短词列才是真表头
+        cells = {k: v for k, v in cells.items() if len(' '.join(v)) <= 20}
         if len(cells) < 2:
             continue
         headers = [' '.join(v) for k, v in sorted(cells.items())]
@@ -144,9 +207,10 @@ def parse_tables(msp, unit_scale_mm=1.0):
         header_xs = [cols[k]['x'] for k in header_keys]
         gaps = [header_xs[i] - header_xs[i-1] for i in range(1, len(header_xs)) if header_xs[i] - header_xs[i-1] > 0]
         if gaps:
-            from collections import Counter
-            common_gap = Counter(round(g / 500) * 500 for g in gaps).most_common(1)[0][0] or 1000
-            break_gap = max(common_gap * 3, 3000)
+            # v6.4: 断点用列距中位数×4(原用众数, 列距分散时众数失真会把表头切断)
+            gaps_sorted = sorted(gaps)
+            median_gap = gaps_sorted[len(gaps_sorted) // 2]
+            break_gap = max(median_gap * 4, 3000)
         else:
             break_gap = 3000
         segments = []
@@ -165,31 +229,91 @@ def parse_tables(msp, unit_scale_mm=1.0):
             seg_type = detect_table_type(seg_headers)
             if not seg_type:
                 continue
+            # v6.4: 表头行必须是真表头(短字段词), 排除图名/目录行(如 '设计说明 材料做法表 | A1')
+            if seg_type == '做法表' and not any(
+                    any(k in h for k in ('编号', '名称', '类别', '部位', '位置', '层次', '构造', '做法')) for h in seg_headers):
+                continue
+            # v6.4: 做法表段内剔除左侧杂质列(跨栏短词/段落标题, 如 '框架结构'/'（四）防水、防潮工程'),
+            # 保留 编号列 及其左侧1列(类别) 到末尾
+            if seg_type == '做法表':
+                bi = next((i for i, h in enumerate(seg_headers) if '编号' in h), None)
+                if bi is not None and bi > 0:
+                    keep_from = max(0, bi - 1)
+                    seg = seg[keep_from:]
+                    seg_headers = seg_headers[keep_from:]
             seg_x_lo = cols[seg[0]]['x'] - 300
             seg_x_hi = cols[seg[-1]]['x'] + 300
             seg_cols = set(seg)
+            seg_cols_sorted = sorted(seg, key=lambda k: cols[k]['x'])
             pos_key = (round(seg_x_lo / 500), seg_type)
             if pos_key in used_header_positions:
                 continue
             used_header_positions.add(pos_key)
             data_rows = []
+            # v6.4: 数据行 y 范围 — 表格数据在表头下方有限高度内(150 倍表头字高),
+            # 防止把表头下方更远处的其他表格(如门窗表)文字收进来(x 列重叠时必混)
+            hdr_h = max((t['h'] for t in rows[ri]['items']), default=2.5)
+            span_limit = max(hdr_h * 150, 30000)
+            empty_run = 0
             for rj in range(ri + 1, len(rows)):
+                if rows[ri]['y'] - rows[rj]['y'] > span_limit:
+                    continue  # 距表头过远(其他表格区域)
                 cells_j = grid.get(rj, {})
                 if not cells_j:
-                    if data_rows:
+                    # v6.4: 原逻辑遇空行即 break — 全局聚类下表格行之间常有'空行'
+                    # (该 y 处无本表文字但被其他区域文字占位), 会过早截断数据行
+                    empty_run += 1
+                    if empty_run >= 5:
                         break
                     continue
+                empty_run = 0
                 in_range = any(seg_x_lo <= t['x'] <= seg_x_hi for t in rows[rj]['items'])
                 if not in_range:
                     continue
-                # v4.1.3: 只取本段列范围的数据(排除其他表/标高的列)
-                seg_cells = {k: v for k, v in cells_j.items() if k in seg_cols or
-                             (k not in seg_cols and cols[k]['x'] <= seg_x_hi and cols[k]['x'] >= seg_x_lo)}
+                # v6.4: 表头/数据列 x 存在系统性漂移(梯形表格: 表头'名称'列 x=2091505,
+                # 数据'木质地板'列 x=2090770), 严格 k in seg_cols 匹配会丢数据。
+                # 数据行列数 ≥ 表头列数一半 → 按行内 x 顺序与表头列一一对齐;
+                # 否则(行缺列多)退化为最近表头列匹配。
+                row_cols = sorted((k for k in cells_j
+                                   if seg_x_lo <= cols[k]['x'] <= seg_x_hi),
+                                  key=lambda k: cols[k]['x'])
+                if len(row_cols) >= max(len(seg_cols_sorted) // 2, 2):
+                    # v6.4: 编号列锚定 — 做法表数据行可能缺'类别'列(如 楼2 行只有5列),
+                    # 顺序对齐会整体左移错位; 用编号样式(楼1/墙1/棚1)锚定后再对齐
+                    seg_cells = {}
+                    if seg_type == '做法表':
+                        hbi = next((i for i, h in enumerate(seg_headers) if '编号' in h), None)
+                        bi_data = next((i for i, k in enumerate(row_cols)
+                                        if re.fullmatch(r'[\u4e00-\u9fa5]{1,3}\d{1,2}',
+                                                        ' '.join(cells_j[k])[:8].strip())), None)
+                        if hbi is not None and bi_data is not None:
+                            offset = hbi - bi_data
+                            for i, sk in enumerate(seg_cols_sorted):
+                                j = i - offset
+                                if 0 <= j < len(row_cols):
+                                    seg_cells[sk] = cells_j[row_cols[j]]
+                    if not seg_cells:
+                        for i, sk in enumerate(seg_cols_sorted):
+                            if i < len(row_cols):
+                                seg_cells[sk] = cells_j[row_cols[i]]
+                else:
+                    seg_cells = {sk: cells_j[row_cols[0]] for sk in seg_cols_sorted
+                                 if row_cols and abs(cols[row_cols[0]]['x'] - cols[sk]['x']) <= 2500}
                 if not seg_cells:
                     continue
+                # v6.4: 做法表数据行须有有效编号(楼1/墙1/棚1 样式), 碎片行(如 '面'/'* 1.5厚...')不收
+                if seg_type == '做法表':
+                    hbi = next((i for i, h in enumerate(seg_headers) if '编号' in h), None)
+                    if hbi is not None and hbi < len(seg_cols_sorted):
+                        id_key = seg_cols_sorted[hbi]
+                        id_val = ' '.join(seg_cells.get(id_key, []) or []).strip()
+                        if not re.fullmatch(r'[\u4e00-\u9fa5]{1,3}\d{1,2}', id_val):
+                            continue
                 data_rows.append({
                     'y': rows[rj]['y'],
-                    'cells': [' '.join(v) for k, v in sorted(seg_cells.items())],
+                    # v6.4: 严格按表头列序补全(缺列填空) — 保证 cells 与 headers 长度/位置对齐,
+                    # table_to_layers 等下游按列索引取值(缺列行会整体左移错位)
+                    'cells': [' '.join(seg_cells.get(k, [])) for k in seg_cols_sorted],
                     'grid': seg_cells,
                 })
             if not data_rows:

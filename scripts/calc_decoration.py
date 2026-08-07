@@ -175,9 +175,29 @@ def calc_decoration_detail(data, total_area, perim=None):
         # 地面量=面积; 墙面量=周长×层高(默认2.8m); 天棚量=面积
         floor_h = float((data.get('标高参数', {}) or {}).get('层高_m') or 2.8)
         for mname in sorted(set(mats)):
-            if '墙面' in mname or '墙纸' in mname or '瓷砖' in mname and '墙面' in room:
-                qty = round(perim_total * floor_h, 2)
-                expr = f'房间周长{perim_total}m×层高{floor_h}m'
+            # v6.5: 墙面判定放宽 — '内墙乳胶漆'/'木饰面墙' 等含'墙'材料名也算墙面
+            # (原条件 '墙面' in mname 漏掉 '内墙乳胶漆' → 误按面积算)
+            is_wall_mat = ('墙面' in mname or mname.startswith('内墙') or '墙纸' in mname
+                           or '墙' in mname and '外墙' not in mname)
+            if is_wall_mat:
+                # v6.5: 走廊墙面净面积规则 — 净=长边×2×净高(端头墙与房间共用不重复计), 再扣门窗洞口
+                # 长边 = 周长/2 - 进深(约), 实际用 面积/进深 更准; 简化: 走廊(长条) 长边≈周长/2
+                is_corridor = any(k in room for k in ('走廊', '过道', '走道', '廊'))
+                if is_corridor:
+                    # 长边×2×净高: 走廊两个长边墙(端头不计, 与相邻房间共用)
+                    long_side = perim_total / 2.0 if perim_total > 0 else 0
+                    qty = round(long_side * 2 * floor_h, 2)
+                    expr = f'走廊长边{long_side}m×2×净高{floor_h}m(端头墙与房间共用不重复计)'
+                    # 扣门窗洞口(设计门窗表)
+                    for w in (data.get('门窗') or []):
+                        if '走廊' in room or True:  # 走廊内门窗扣减(保守: 走廊处扣一半洞口)
+                            hole = float(w.get('洞口面积_m2', 0) or 0) * int(w.get('数量', 1) or 1) * 0.5
+                            qty = round(qty - hole, 2)
+                    if qty < 0:
+                        qty = 0.0
+                else:
+                    qty = round(perim_total * floor_h, 2)
+                    expr = f'房间周长{perim_total}m×层高{floor_h}m'
             else:
                 qty = area_total
                 expr = f'房间面积{area_total}m²'

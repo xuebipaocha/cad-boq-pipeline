@@ -154,6 +154,48 @@ def match_rooms_to_layers(rooms, construction_layers):
     return out
 
 
+def axis_zone_partition(axis_map, zone_ranges, poly_points, scale=1.0):
+    """v6.5: 轴线分区量取 — 长廊式大进深厂房按轴线分区计算面积/周长/进深。
+
+    axis_map: {轴线号(str): 坐标值(float)} — 轴线坐标字典(如 '1':0, '8':42000, 'A':0, 'G':18000)
+    zone_ranges: [{'分区': '128轴分段部', '轴1': '1', '轴2': '8', '轴A': 'A', '轴B': 'G'}, ...]
+      — 分区 range 串: 轴号区间(横向 1-8 / 纵向 A-G)
+    poly_points: 房间多边形顶点 [(x, y), ...] (CAD 坐标系)
+    scale: 图纸比例(默认 1.0)
+
+    返回: [{'分区': str, '面积_m2': float, '周长_m': float, '进深_m': float, '轴跨': str}]
+    """
+    zones = []
+    for zr in zone_ranges or []:
+        # 从 axis_map 取坐标(轴号可能有 ①② 或 1-8 两种写法), mm→m
+        x1 = axis_map.get(str(zr.get('轴1', '')), None)
+        x2 = axis_map.get(str(zr.get('轴2', '')), None)
+        y1 = axis_map.get(str(zr.get('轴A', '')), None)
+        y2 = axis_map.get(str(zr.get('轴B', '')), None)
+        # 兼容: 轴A/轴B 为 None 时用横向轴跨的 1/3 估进深
+        if x1 is None or x2 is None:
+            continue
+        width = abs(float(x2) - float(x1)) * scale / 1000.0
+        # 进深: 有纵向轴则用纵向跨度, 否则从多边形包围盒估
+        if y1 is not None and y2 is not None:
+            depth = abs(float(y2) - float(y1)) * scale / 1000.0
+        else:
+            if not poly_points:
+                continue
+            ys = [p[1] for p in poly_points]
+            depth = (max(ys) - min(ys)) * scale / 1000.0
+        area = round(width * depth, 2)
+        perim = round(2 * (width + depth), 2)
+        zones.append({
+            '分区': zr.get('分区', f'{zr.get("轴1","")}-{zr.get("轴2","")}轴'),
+            '面积_m2': area,
+            '周长_m': perim,
+            '进深_m': round(depth, 2),
+            '轴跨': f"{zr.get('轴1','')}-{zr.get('轴2','')}",
+        })
+    return zones
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print('用法: python3 room_geometry.py 图纸.dxf')
