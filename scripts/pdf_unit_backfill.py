@@ -3,7 +3,7 @@
 
 背景: national_24.db 的 standard_items 有 1,639 条 unit 为空
 (源 PDF 为扫描件, 初次 OCR 漏读"单位"列)。
-本工具: 渲染 PDF 页 → qwen3.7-flash 视觉识别表格 → 解析(编码,单位) → 回填数据库。
+本工具: 渲染 PDF 页 → qwen3-vl-flash 视觉识别表格 → 解析(编码,单位) → 回填数据库。
 
 用法:
   python3 pdf_unit_backfill.py                          # 全量 11 本

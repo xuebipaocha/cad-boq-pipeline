@@ -31,37 +31,181 @@ def _extract_height_m(texts, default=None):
 
 
 def _facade_area_from_dims(recog):
-    """外墙面积: 立面图 DIMENSION 提取(水平×垂直)。
-    找立面图标注: 水平标注(宽)×垂直标注(高) → 面积。
-    无 → (None, SRC_PENDING, '无立面图尺寸标注')
+    """外墙面积: 图纸 DIMENSION 提取(水平×垂直)。
+
+    v6.4 修复(2026-08-06 现场图纸暴露):
+    - 原实现取"全局最大水平标注×全局最大垂直标注", 不同视图(平面/剖面/立面)的
+      标注会跨视图乱配, 且 value(标注文字)与 target_len(几何长度)可能严重不符
+      (如 227830 vs 17009) — 造成虚假面积。
+    - 现按标注 y 位置聚类为视图带, 带内组合 max(水平)×max(垂直);
+    - value 与 target_len 偏差>20% 的标注视为矛盾, 面积结果标"待核"(图面文字
+      证据保留, 但提醒人工复核)。
     """
     dims = recog.get('标注关联', []) or []
     if not dims:
         dims = recog.get('标注尺寸', []) or []
-    # 水平标注(宽)与垂直标注(高)各取最大
-    widths, heights = [], []
+    rows = []
     for d in dims:
-        if isinstance(d, dict):
-            t = d.get('type', '')
-            v = d.get('value') or d.get('target_len') or 0
-        else:
+        if not isinstance(d, dict):
             continue
+        t = d.get('type', '')
+        v = d.get('value') or d.get('target_len') or 0
+        tl = d.get('target_len') or 0
         try:
             v = float(v)
+            tl = float(tl)
         except (TypeError, ValueError):
             continue
         if v <= 0:
             continue
-        if t in ('horizontal', '水平'):
-            widths.append(v)
-        elif t in ('vertical', '垂直'):
-            heights.append(v)
-    if widths and heights:
+        rows.append({'t': t, 'v': v, 'tl': tl, 'x': d.get('x', 0), 'y': d.get('y', 0)})
+    if not rows:
+        return None, SRC_PENDING, '无立面图尺寸标注'
+    # 同视图分带: 按 y 排序, 相邻标注 gap 超过"当前总跨度 30%"或 5000 单位 → 新带
+    rows.sort(key=lambda r: r['y'])
+    y0 = rows[0]['y']
+    y_span = rows[-1]['y'] - y0
+    bands, cur = [], [rows[0]]
+    for r in rows[1:]:
+        gap = r['y'] - cur[-1]['y']
+        if gap > max(y_span * 0.3, 5000.0):
+            bands.append(cur)
+            cur = [r]
+        else:
+            cur.append(r)
+    bands.append(cur)
+    best, best_note = None, ''
+    for band in bands:
+        widths = [r['v'] for r in band if r['t'] in ('horizontal', '水平')]
+        heights = [r['v'] for r in band if r['t'] in ('vertical', '垂直')]
+        if not widths or not heights:
+            continue
         w = max(widths) / 1000.0  # mm→m
         h = max(heights) / 1000.0
         area = round(w * h, 2)
-        return area, SRC_MEASURED, f'立面图标注 {w}×{h}'
+        # v6.4: value(标注文字) vs target_len(几何长度) 一致性校验 — 先看整体缩放:
+        # 若带内绝大多数标注的 value/target_len 比率接近同一常数(缩放出图),
+        # 则 value 为设计值, 不标矛盾; 仅偏离群体的个别标注视为真矛盾。
+        ratios = [r['v'] / r['tl'] for r in band if r['tl'] > 0]
+        bad = []
+        if ratios:
+            ratios.sort()
+            med = ratios[len(ratios) // 2]
+            bad = [r for r in band if r['tl'] > 0
+                   and abs(r['v'] / r['tl'] - med) / max(med, 1e-9) > 0.5]
+        note = f'图纸尺寸标注 {w}×{h}'
+        if bad:
+            if len(bad) > 5:
+                note += ' (标注文字与几何长度多处不符,待核)'
+            else:
+                note += f' (标注文字与几何长度不符{len(bad)}处,待核)'
+        if best is None or area > best:
+            best, best_note = area, note
+    if best:
+        return best, SRC_MEASURED, best_note
     return None, SRC_PENDING, '无立面图尺寸标注'
+
+
+def _parse_finishing_table(recog):
+    """v6.4: 从识图结果'表格'解析做法表 → [{编号, 名称, 位置, 做法, 备注}]。
+    做法表为 类别|编号|名称|所用位置|构造做法|备注 结构(楼1/墙1/棚1 驱动)。
+    """
+    rows_out = []
+    for tb in (recog.get('表格') or []):
+        if tb.get('type') != '做法表':
+            continue
+        headers = tb.get('headers') or []
+        if not any('编号' in h.replace(' ', '') for h in headers):
+            continue
+        for row in tb.get('rows') or []:
+            cells = row.get('cells') or []
+            if len(cells) < 2:
+                continue
+            rec = {}
+            for i, h in enumerate(headers):
+                if i >= len(cells):
+                    break
+                hh = h.replace(' ', '')
+                cs = str(cells[i]).strip()
+                if '编号' in hh:
+                    rec['编号'] = cs
+                elif '名称' in hh:
+                    rec['名称'] = cs
+                elif '位置' in hh or '部位' in hh:
+                    rec['位置'] = cs
+                elif '做法' in hh or '构造' in hh:
+                    rec['做法'] = cs
+                elif '备注' in hh:
+                    rec['备注'] = cs
+            if rec.get('编号'):
+                rows_out.append(rec)
+    return rows_out
+
+
+def _interior_finishing(data):
+    """v6.4: 室内装饰重做算量 — 做法表(楼/墙/棚/窗台)驱动 + 施工范围(一至三层) + 平面面积×层数。
+
+    大修工程核心内容(拆除后重新装饰: '一至三层房间内地板地面、涂料墙面及涂料顶棚面层拆除,
+    拆除后重新装饰'), 原算量完全缺失(只出外墙系)。
+    面积口径(估算并标'待核'):
+    - 楼面/顶棚 = 平面闭合面积 × 层数
+    - 墙面     = 平面周长 × 层高 × 层数
+    - 窗台     = 无面积证据 → 待提取
+    返回 (分项列表, {楼面_m2, 墙面_m2, 顶棚_m2}) — 面积字典供拆除分项复用。
+    """
+    rows = _parse_finishing_table(data)
+    if not rows:
+        return [], {}
+    texts = data.get('施工说明', []) or []
+    tc = ' '.join(texts)
+    # 层数: 施工范围文字 '一至三层'/'一二三层'/'三层' → 3; 否则默认 2
+    if re.search(r'一[至到~～]三|一二三|三层|1[~～-]3', tc):
+        floors = 3
+    else:
+        floors = 2
+    areas = data.get('面积区域') or []
+    plane_area = max((a.get('面积_m2', 0) or 0 for a in areas), default=0)
+    perimeter = max((a.get('周长_m', 0) or 0 for a in areas), default=0)
+    if plane_area <= 0:
+        return [], {}  # 无平面面积证据 → 不估算(拆除/重做分项走待提取)
+    floor_h = 3.2
+    elev = data.get('标高参数') or {}
+    if elev.get('层高_m'):
+        try:
+            floor_h = float(elev['层高_m'])
+        except (TypeError, ValueError):
+            pass
+    items = []
+    area_map = {'楼面_m2': round(plane_area * floors, 2),
+                '顶棚_m2': round(plane_area * floors, 2),
+                '墙面_m2': round(perimeter * floor_h * floors, 2)}
+    for r in rows:
+        code = (r.get('编号') or '').strip()
+        name = (r.get('名称') or '').strip()
+        pos = (r.get('位置') or '').strip()
+        recipe = (r.get('做法') or '').strip()
+        if not name:
+            continue
+        note = f'做法表[{code}]{name}'
+        if pos:
+            note += f' {pos}'
+        if recipe:
+            note += f' {recipe[:46]}'
+        if code.startswith('楼'):
+            q = area_map['楼面_m2']
+            note += f'; 面积=平面{plane_area}×{floors}层(待核,多做法需按房间分劈)'
+            items.append(_q(f'室内楼地面{name}', 'm²', q, note, SRC_ESTIMATED, 部位=pos))
+        elif code.startswith('墙'):
+            q = area_map['墙面_m2']
+            note += f'; 面积=周长{perimeter}×层高{floor_h}×{floors}层(待核)'
+            items.append(_q(f'室内墙面{name}', 'm²', q, note, SRC_ESTIMATED, 部位=pos))
+        elif code.startswith('棚'):
+            q = area_map['顶棚_m2']
+            note += f'; 面积=平面{plane_area}×{floors}层(待核)'
+            items.append(_q(f'室内顶棚{name}', 'm²', q, note, SRC_ESTIMATED, 部位=pos))
+        elif code.startswith('窗台'):
+            items.append(_q(f'窗台{name}', 'm²', 0, '待提取: 无窗台面积证据', SRC_PENDING, 部位=pos))
+    return items, area_map
 
 
 def _facade_area(recog):
@@ -102,6 +246,13 @@ def calc(data):
     # 外墙面积(通用: 文字标注 > 立面图尺寸 > 待提取; 无项目特定公式)
     facade, facade_src, facade_note = _facade_area(data)
 
+    # v6.4: 室内装饰重做(做法表驱动) — 大修核心内容, 先算面积供拆除分项复用
+    interior_items, area_map = _interior_finishing(data)
+    r.extend(interior_items)
+    floor_area = area_map.get('楼面_m2', 0)
+    wall_area = area_map.get('墙面_m2', 0)
+    ceiling_area = area_map.get('顶棚_m2', 0)
+
     # ── 结构化解析(文字证据) ──
     parsed = parse_renovation_text(texts)
     demos = parsed['拆除项']
@@ -129,7 +280,18 @@ def calc(data):
         elif facade and ('外墙' in part or '涂料' in obj):
             r.append(_q(name, 'm²', facade, f'{facade_note}', facade_src))
         else:
-            r.append(_q(name, 'm²', 0, '待提取: 无面积证据', SRC_PENDING))
+            # v6.4: 拆除面积复用室内装饰面积(做法表+平面面积×层数, 同范围重做)
+            area, area_note = 0, ''
+            if any(k in (part + obj) for k in ('地面', '楼面', '地板', '找平')):
+                area, area_note = floor_area, '室内楼面面积(平面×层数,待核)'
+            elif any(k in (part + obj) for k in ('顶棚', '天棚')):
+                area, area_note = ceiling_area, '室内顶棚面积(平面×层数,待核)'
+            elif any(k in (part + obj) for k in ('墙', '涂料')):
+                area, area_note = wall_area, '室内墙面面积(周长×层高×层数,待核)'
+            if area > 0:
+                r.append(_q(name, 'm²', area, f'{area_note}', SRC_ESTIMATED))
+            else:
+                r.append(_q(name, 'm²', 0, '待提取: 无面积证据', SRC_PENDING))
 
     # ── 2. 外墙做法分项(做法层, 按工程分项归并) ──
     # v5.6: 只归并"面层/基层/防水"三大类, 设计说明中的孤立材料词
@@ -197,12 +359,40 @@ def calc(data):
 
     # ── 5. 屋面翻新 ──
     if any('屋面' in d.get('部位', '') or '屋面' in d.get('对象', '') for d in demos):
-        r.append(_q('屋面翻新', 'm²', 0, '待提取: 无屋面面积证据', SRC_PENDING))
+        # v6.4: 屋面面积复用平面闭合面积(屋顶投影=平面面积, 标待核)
+        roof_area = max((a.get('面积_m2', 0) or 0 for a in data.get('面积区域') or []), default=0)
+        if roof_area > 0:
+            r.append(_q('屋面翻新', 'm²', round(roof_area, 2),
+                        f'平面面积{roof_area}(屋顶投影,待核)', SRC_ESTIMATED))
+        else:
+            r.append(_q('屋面翻新', 'm²', 0, '待提取: 无屋面面积证据', SRC_PENDING))
 
     # ── 6. 外立面脚手架(依赖外墙面积) ──
     if facade:
         r.append(_q('外立面脚手架', 'm²', facade, f'{facade_note}', facade_src))
     else:
         r.append(_q('外立面脚手架', 'm²', 0, '待提取: 无外墙面积证据', SRC_PENDING))
+
+    # ── v6.5: 门窗更换分项(设计内容"门窗" + 门窗表驱动) ──
+    windows = data.get('门窗') or []
+    if '门窗' in tc or any('门窗' in (d.get('部位') or '') for d in (data.get('设计意图') or {}).get('设计内容', []) or []):
+        if windows:
+            total_area = round(sum(float(w.get('洞口面积_m2', 0) or 0) * int(w.get('数量', 1) or 1) for w in windows), 2)
+            n_doors = sum(int(w.get('数量', 1) or 1) for w in windows if str(w.get('门窗号', '')).startswith('M'))
+            n_wins = sum(int(w.get('数量', 1) or 1) for w in windows if str(w.get('门窗号', '')).startswith('C'))
+            r.append(_q('门窗更换', '樘', n_doors + n_wins,
+                        f'门{n_doors}樘+窗{n_wins}樘(门窗表)', SRC_TEXT))
+            r.append(_q('门窗拆除', '樘', n_doors + n_wins,
+                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 与更换配套)', SRC_TEXT))
+            r.append(_q('门窗洞口面积', 'm²', total_area,
+                        f'{total_area}m²(门窗表洞口合计, 墙扣减用)', SRC_TEXT))
+        else:
+            r.append(_q('门窗更换', '樘', 0, '待提取: 设计内容含门窗, 无门窗表', SRC_PENDING))
+
+    # ── v6.5: 走廊分项(设计内容"走廊"触发) ──
+    if any('走廊' in (d.get('部位') or '') for d in (data.get('设计意图') or {}).get('设计内容', []) or []) or '走廊' in tc:
+        corridor_note = '待提取: 走廊面积需按平面图分区'
+        r.append(_q('走廊墙面维修', 'm²', 0, corridor_note, SRC_PENDING))
+        r.append(_q('走廊地面维修', 'm²', 0, corridor_note, SRC_PENDING))
 
     return r

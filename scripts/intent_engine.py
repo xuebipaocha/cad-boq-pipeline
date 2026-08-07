@@ -115,6 +115,22 @@ def infer_design_intent(pid):
     if b['含项']:
         out['证据链'].append(f"边界: 含 {b['含项'][:3]}")
 
+    # ── ②b 设计内容(大修/翻新: 逐条结构化 → 施工范围) ──
+    try:
+        from reno_parser import parse_design_scope
+        scope_texts = []
+        for n in notes:
+            scope_texts.append(n.get('注释') or '')
+        for s in dn.get('施工范围') or []:
+            scope_texts.append(s)
+        scope_texts += (dn.get('原文') or []) or []
+        scope_items = parse_design_scope(scope_texts)
+        if scope_items:
+            out['设计内容'] = scope_items
+            out['证据链'].append(f"设计内容: {len(scope_items)} 条 ({', '.join(it['部位'] or it['对象'] for it in scope_items[:5])})")
+    except Exception:
+        pass
+
     # ── ③ 参数推断(设计常识: 部位+材料+做法 → 参数) ──
     # 收集证据文本: 局部注释 + 设计说明材料/做法
     evidence_pool = []

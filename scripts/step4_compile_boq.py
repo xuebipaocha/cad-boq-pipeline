@@ -8,7 +8,7 @@
 - 清单质量报告：匹配率、低置信度项、单位偏差等。
 - 分部自动归类：按专业和项目特征自动分配分部。
 """
-import sys, os, json
+import sys, os, json, re
 sys.stdout.reconfigure(encoding='utf-8')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -82,6 +82,27 @@ def _clean_spec(spec):
     return ' '.join(parts)
 
 
+def _extract_project_name(recog):
+    """v6.4: 从施工说明提取工程名称(如 '工程名称一工场船体大楼大修项目 耐火等级' → 
+    '一工场船体大楼大修项目')。无 → 空串(模板示例文本保留原样)。
+    """
+    stop = ('耐火', '建设地点', '抗震', '结构形式', '建筑使用', '工程等级',
+            '建设单位', '建筑面积', '设计单位', '序号', '图号', '页数')
+    for note in (recog or {}).get('施工说明') or []:
+        m = re.search(r'工程名称[：:]?\s*([^\s；;，,]{2,40})', str(note))
+        if not m:
+            continue
+        name = m.group(1)
+        for s in stop:
+            idx = name.find(s)
+            if idx > 0:
+                name = name[:idx]
+        name = name.strip()
+        if 4 <= len(name) <= 30:
+            return name
+    return ''
+
+
 # v5.17: 分项名 → 图纸特征匹配关键词(构造层/做法表/施工说明)
 _ITEM_FEATURE_KEYWORDS = {
     '混凝土': ['混凝土', '砼'],
@@ -143,6 +164,10 @@ def _match_features_for_item(name, recog):
     for kw, group in _ITEM_FEATURE_KEYWORDS.items():
         if kw in name or any(g in name for g in group):
             kws.extend(group)
+    # v6.4: 并入分项名材料词 — 使做法表构造层(如'木质地板')可被匹配
+    for w in ('木质地板', 'PVC', '橡胶', '塑胶', '无机涂料', '面砖', '防潮板', '浅黄色', '地砖', '地板'):
+        if w in name:
+            kws.append(w)
     if not kws:
         return ''
     # 构造层: 名称/材料含关键词
@@ -158,11 +183,32 @@ def _match_features_for_item(name, recog):
                 seg.append(f"{layer['厚度_mm']}mm")
             if seg:
                 hits.append(' '.join(seg))
-    # 施工说明: 含关键词的行
+    # 施工说明: 含关键词的"做法行"(v6.4: 需含分项材料词+做法特征, 防止碎片行乱入)
+    # 原实现仅按关键词(如'墙')匹配, 图纸文字碎片化时会把无关行拼进特征
+    _MAT_KW = ['抹灰', '砂浆', '防水', '涂料', '抗裂', '网格布', '腻子', '漆',
+               '保温', '石材', '砖', '混凝土', '找平', '垫层', '面层', '乳胶漆',
+               '脚手架', '卷材', '水泥', '细石', '垫层', '地板', '地砖', '面砖']
+    _RECIPE_MARK = ['厚', '道', '遍', 'mm', '铺', '抹', '刷', '涂', '贴', '做',
+                    '层', '砂浆', '防水', '涂料', '腻子', '网格布', '卷材', '面层']
+    mat_kws = [w for w in _MAT_KW if w in name]
+    # v6.4: 部位约束 — 分项名含部位词时, 匹配行必须提及该部位(防跨部位误配:
+    # 如"外墙防水"不得引用"卫生间防水"做法)
+    _PART_KW = ['外墙', '内墙', '屋面', '地面', '楼面', '楼梯', '天棚', '顶棚',
+                '走廊', '卫生间', '室外', '室内', '立面']
+    part_kws = [w for w in _PART_KW if w in name]
     for note in (recog or {}).get('施工说明') or []:
         s = str(note).strip()
-        if s and any(k in s for k in kws) and len(s) < 60:
-            hits.append(s)
+        if not s or not any(k in s for k in kws):
+            continue
+        if mat_kws and not any(m in s for m in mat_kws):
+            continue  # 行未提及该分项的材料 → 不相关碎片
+        if part_kws and not any(p in s for p in part_kws):
+            continue  # 行未提及该分项的部位 → 跨部位误配
+        if not any(m in s for m in _RECIPE_MARK) or len(s) < 12 or len(s) > 160:
+            continue  # 非做法行 / 过短碎片 / 超长拼接行
+        if any(x in s for x in ('规程', '规范', '标准', 'GB5', 'GB/T', '图集', '建筑高度', '耐火等级', '工程名称', '页数', '抗震设防', '结构形式', '建设单位')):
+            continue  # 规范引用/工程概况行不是做法
+        hits.append(s)
     # 去重保序
     seen, out = set(), []
     for h in hits:
@@ -284,6 +330,33 @@ def compile_boq_quality_report(boq_items):
         elif ratio > 0.1:
             warnings.append({'级别':'中','问题':f'估算/待提取值 {est_n+pending_n} 项，占{ratio:.0%}','建议':'重点复核估算项'})
 
+    # v6.5: 合计加和性卡口 — 合价合计 = 明细之和(防止 149≠134 类错误)
+    # 未匹配编码的明细项独立列示, 不得被合计吞掉
+    def _is_total_row(i):
+        return '合计' in str(i.get('name', '')) or '总计' in str(i.get('name', ''))
+    priced = [i for i in boq_items if i.get('合价') is not None and not _is_total_row(i)]
+    if priced:
+        sum_parts = round(sum(float(i.get('合价', 0) or 0) for i in priced), 2)
+        total_price = None
+        # 合计可能在最后一项(分部汇总行)或独立 total 字段
+        for i in boq_items:
+            if _is_total_row(i):
+                total_price = i.get('合价')
+                break
+        if total_price is not None:
+            diff = round(abs(float(total_price) - sum_parts), 2)
+            if diff > 0.01:
+                warnings.append({'级别': '高',
+                                 '问题': f'合计加和性错误: 明细合价之和 {sum_parts} ≠ 合计 {total_price} (差 {diff})',
+                                 '建议': '检查分部汇总行与明细项是否遗漏/重复'})
+        # 未匹配编码明细独立列示检查
+        unmapped = [i for i in priced if i.get('is_substitute') and i.get('合价')]
+        if unmapped:
+            unmapped_sum = round(sum(float(i.get('合价', 0) or 0) for i in unmapped), 2)
+            warnings.append({'级别': '低',
+                             '问题': f'自补清单项 {len(unmapped)} 项合价 {unmapped_sum} 元(独立列示, 未并入标准项合计)',
+                             '建议': '自补项需人工确认单价后并入总价'})
+
     score = max(0, 100 - sum({'高':20,'中':10,'低':4}.get(w['级别'],5) for w in warnings))
     score = int(score * (0.5 + 0.5 * match_rate))  # 匹配率权重
     return {
@@ -337,6 +410,7 @@ def run(calc_json, output_dir):
     skipped = 0
     supplement_seq = 1  # v5.17: 自补清单序号
     pending_items = []  # v5.6: 待提取分项独立交付, 不进清单
+    project_name = ''   # v6.4: 工程名称(图纸提取, 覆盖模板示例)
     for item in calc_results:
         name = item.get('分项名称', '')
         qty = item.get('工程量', 0) or 0
@@ -363,6 +437,9 @@ def run(calc_json, output_dir):
         lst = find_list_item(name, category=cat, top_n=5)
         best = lst[0] if lst else {}
         score = best.get('_score', 0) or 0
+        # v6.4: 房建专业拆除分项无合适国标项(拆除类多为市政/爆破), 强制自补防错配(如'楼梯墙拆除'→'楼梯')
+        if '拆除' in name and specialty in ('房屋建筑与装饰工程', '建筑与装饰工程'):
+            best, score = {}, 0.0
         # v4.0: 匹配确认阈值 0.35→0.5, 且低置信度(0.25-0.45)必须标记待复核
         # v5.17: 低置信度不标"待匹配"——按国标自补清单规则生成 B 类编码(专业码+B+序号)
         confident = bool(best) and score >= 0.45
@@ -401,12 +478,17 @@ def run(calc_json, output_dir):
         else:
             features = feat_spec or feat_layers or name
 
+        # v6.4: 工程名称(图纸施工说明提取, 覆盖模板示例文本)
+        if not project_name:
+            project_name = _extract_project_name(recog_data)
+
         boq_items.append({
             'seq': len(boq_items) + 1,
             'code': code,
             'name': list_name or name,
             'source_name': name,
             'section': section,
+            'project': project_name,
             'unit': list_unit or calc_unit,
             'calc_unit': calc_unit,
             'qty': final_qty,

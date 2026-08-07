@@ -37,6 +37,20 @@ def fill_boq_template(boq_items, template_path, output_path):
     if '表E.2.1 分部分项工程项目清单计价表' in wb.sheetnames:
         ws = wb['表E.2.1 分部分项工程项目清单计价表']
 
+        # v6.4: 用实际工程名称覆盖模板预填的示例文本(工程名称/标段行)
+        proj = next((i.get('project', '') for i in boq_items if i.get('project')), '')
+        if proj:
+            for row in range(1, 4):
+                for col in range(1, 11):
+                    try:
+                        v = ws.cell(row=row, column=col).value
+                    except Exception:
+                        continue
+                    if isinstance(v, str) and v.startswith('工程名称'):
+                        ws.cell(row=row, column=col, value=f'工程名称：{proj}')
+                    elif isinstance(v, str) and v.startswith('标段'):
+                        ws.cell(row=row, column=col, value=f'标段：{proj}')
+
         # 清旧数据（R5以下）
         for row in range(5, ws.max_row + 1):
             for col in range(1, 11):

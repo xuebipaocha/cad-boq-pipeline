@@ -121,6 +121,43 @@ def calculate_by_formula(fc, data, rule_text=''):
     return 0, '未知公式'
 
 
+def _apply_scope_mask(drawing_data, results):
+    """v6.5: 施工范围掩码 — 设计内容(设计意图范围) + 不含项 裁剪算量分项。
+    范围外分项标记'范围外', 不进清单。"""
+    try:
+        intent = (drawing_data.get('设计意图') or {})
+        excludes = (intent.get('算量边界') or {}).get('不含项') or []
+        design_scope = (intent.get('设计内容') or []) or []
+        if excludes or design_scope:
+            scope_parts = set()
+            for it in design_scope:
+                p = it.get('部位') or ''
+                o = it.get('对象') or ''
+                if p:
+                    scope_parts.add(p)
+                if o and o != '墙':
+                    scope_parts.add(o)
+            for it in results:
+                nm = it.get('分项名称', '')
+                out_reason = ''
+                # 1) 不含项显式排除
+                for ex in excludes:
+                    if ex and ex.strip() and ex.strip() in nm:
+                        out_reason = f'施工范围不含[{ex.strip()}]'
+                        break
+                # 2) 大修有设计内容但分项不在范围内 → 范围外(待确认)
+                if not out_reason and scope_parts:
+                    if not any(p in nm for p in scope_parts if p):
+                        out_reason = '设计内容未覆盖该分项'
+                if out_reason:
+                    it['范围外'] = True
+                    it.setdefault('备注', '')
+                    it['备注'] = (it['备注'] + '；' if it['备注'] else '') + out_reason
+    except Exception:
+        pass
+    return results
+
+
 def calculate(drawing_data):
     specialty = drawing_data.get('专业类型', '房屋建筑与装饰工程')
     # v5.4 D6: 大修/改造 + 房建 → 专用计算器, 跳过规则引擎与新建模板
@@ -128,7 +165,7 @@ def calculate(drawing_data):
     if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '大修与改造':
         try:
             from calc_renovation import calc as calc_renovation
-            return calc_renovation(drawing_data)
+            return _apply_scope_mask(drawing_data, calc_renovation(drawing_data))
         except Exception as e:
             print(f'  大修计算器跳过: {e}')
             # 回退到常规路径
@@ -297,11 +334,15 @@ def quality_report(drawing_data, results):
     return {'质量分': score, '警告数量': len(warnings), '警告': warnings[:100]}
 
 
-def export_excel(results, path):
+def export_excel(results, path, pending=None):
+    """导出工程量计算书.xlsx。v6.4: 0量待提取项不再静默剔除 —
+    追加到表尾独立区域(标'待提取'), 交付可见, 不编造量。
+    """
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
     wb = Workbook(); ws = wb.active; ws.title = '工程量计算表'
     hf = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    pf = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
     hft = Font(name='微软雅黑', bold=True, size=11, color='FFFFFF'); df = Font(name='微软雅黑', size=10)
     bd = Border(left=Side(style='thin'),right=Side(style='thin'),top=Side(style='thin'),bottom=Side(style='thin'))
     ws.cell(row=1,column=1,value='工程量计算书').font = Font(name='微软雅黑', bold=True, size=16)
@@ -309,11 +350,24 @@ def export_excel(results, path):
     headers = ['序号','分项名称','单位','工程量','计算式','定额编号','规则来源','备注','计算来源','专业']
     for i,h in enumerate(headers,1):
         c=ws.cell(row=3,column=i,value=h); c.font=hft; c.fill=hf; c.alignment=Alignment(horizontal='center'); c.border=bd
+    r = 4
     for ri,item in enumerate(results):
-        r=ri+4
         vals=[ri+1,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业','')]
         for ci,v in enumerate(vals,1):
             ws.cell(row=r,column=ci,value=v).font=df; ws.cell(row=r,column=ci).border=bd; ws.cell(row=r,column=ci).alignment=Alignment(horizontal='center', wrap_text=True)
+        r += 1
+    # v6.4: 待提取分项(0量占位) — 独立区域, 交付可见
+    if pending:
+        r += 1
+        ws.cell(row=r,column=2,value='▼ 待提取分项（0量占位，图纸无面积/数量证据，需人工补量后重算）').font = Font(name='微软雅黑', bold=True, size=10, color='C00000')
+        ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=10)
+        r += 1
+        for ri,item in enumerate(pending,1):
+            vals=[ri,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业','')]
+            for ci,v in enumerate(vals,1):
+                c=ws.cell(row=r,column=ci,value=v); c.font=df; c.border=bd; c.fill=pf
+                c.alignment=Alignment(horizontal='center', wrap_text=True)
+            r += 1
     for c,w in [('A',6),('B',26),('C',8),('D',10),('E',32),('F',12),('G',18),('H',18),('I',10),('J',10)]: ws.column_dimensions[c].width = w
     wb.save(path)
 
@@ -355,7 +409,7 @@ def run(input_path, output_dir):
     if pending_items:
         print(f'  ⚠ 已剔除 {len(pending_items)} 个 0 量占位项 → 待提取清单.json')
     xlsx_path = os.path.join(output_dir, '工程量计算书.xlsx')
-    export_excel(results, xlsx_path)
+    export_excel(results, xlsx_path, pending_items)
     print(f'  输出: {xlsx_path}')
     json_path = os.path.join(output_dir, '算量结果.json')
     with open(json_path, 'w', encoding='utf-8') as f:
@@ -364,21 +418,8 @@ def run(input_path, output_dir):
         json.dump(pending_items, f, ensure_ascii=False, indent=2)
     with open(os.path.join(output_dir, '算量质量报告.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    # v6.3 C1: 施工范围消费 — 设计意图"不含项"裁剪算量分项(标记范围外, 不进清单)
-    try:
-        intent = (drawing_data.get('设计意图') or {})
-        excludes = (intent.get('算量边界') or {}).get('不含项') or []
-        if excludes:
-            for it in results:
-                nm = it.get('分项名称', '')
-                for ex in excludes:
-                    if ex and ex.strip() and ex.strip() in nm:
-                        it['范围外'] = True
-                        it.setdefault('备注', '')
-                        it['备注'] = (it['备注'] + '；' if it['备注'] else '') + f'施工范围不含[{ex.strip()}]'
-                        break
-    except Exception:
-        pass
+    # v6.5 C1增强: 施工范围掩码(公共函数) — 设计内容 + 不含项 裁剪
+    _apply_scope_mask(drawing_data, results)
     return results
 
 

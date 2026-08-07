@@ -89,7 +89,9 @@ DOMAIN_TERMS = [
     '吊顶','石膏板','铝扣板','石材墙面','块料墙面','墙面砖','石材地面','自流平','架空地板','门套','窗台板',
     '楼梯踏步','天棚','抹灰','釉面砖','抛光砖','大理石','花岗岩',
     # v4.9: 2字材料词(子词拆分可命中)
-    '地砖','瓷砖','地毯','墙纸','壁纸','地板','石材','涂料','吊顶','石膏','铝板'
+    '地砖','瓷砖','地毯','墙纸','壁纸','地板','石材','涂料','吊顶','石膏','铝板',
+    # v6.4: 室内装饰材料(大修做法表驱动分项)
+    'PVC','橡胶地面','塑胶地面','木质地板','无机涂料','面砖','面层','防潮板','吊顶板',
 ]
 
 SYNONYMS = {
@@ -105,6 +107,10 @@ SYNONYMS = {
     '喷刷涂料': ['墙面喷刷涂料'], '刷涂料': ['墙面喷刷涂料'], '墙面涂料': ['墙面喷刷涂料'],
     '吊顶': ['平面吊顶','跌级吊顶','天棚吊顶'], '石膏板': ['平面吊顶'], '铝扣板': ['铝扣板吊顶'],
     '踢脚': ['踢脚线','成品踢脚线'], '石材墙面': ['墙面砖','块料墙面'],
+    # v6.4: 室内装饰材料同义(大修做法表分项 → 国标清单)
+    '橡胶地面': ['塑胶地面', 'PVC'], 'PVC': ['塑胶地面', '塑料地面', '橡胶地面'],
+    '木质地板': ['木地板', '实木复合地板'], '无机涂料': ['墙面喷刷涂料', '天棚喷刷涂料'],
+    '面砖': ['块料墙面', '墙面砖', '面砖墙面'], '防潮板': ['塑料板吊顶', '天棚吊顶'],
 }
 
 SPECIALTY_CATEGORY = {
@@ -113,6 +119,15 @@ SPECIALTY_CATEGORY = {
     '安装工程': ['安装', '电气', '给排水', '暖通', '消防'],
     '园林绿化工程': ['园林', '绿化'],
     '钢结构工程': ['钢结构', '金属结构', '房屋建筑'],
+}
+
+# v6.4: 清单匹配的专业词根(宽松分类过滤 — 木地板在'仿古建筑工程'分类也应可选)
+PROFESSION_KEYWORDS = {
+    '房屋建筑与装饰工程': ['建筑', '装饰'],
+    '通用安装工程': ['安装'],
+    '市政工程': ['市政'],
+    '园林绿化工程': ['园林', '绿化'],
+    '钢结构工程': ['钢结构', '建筑'],
 }
 
 FEE_PROFESSION_MAP = {
@@ -435,7 +450,15 @@ def find_list_item(name, category=None, top_n=5):
         cond, params = _or_query_tokens(tokens)
         sql = "SELECT item_code, item_name, unit, category, search_text FROM standard_items WHERE " + cond
         if category:
-            sql += " AND category LIKE ?"; params.append(f'%{category}%')
+            # v6.4: 专业词根匹配 — '房屋建筑与装饰工程'→['建筑','装饰'] OR 匹配,
+            # 原 LIKE '%category%' 会把 '木地板'(仿古建筑工程) 等有效项误过滤
+            cat_keys = PROFESSION_KEYWORDS.get(category) or [
+                c for c in re.split(r'[、,，/]', category or '') if c and c != '工程']
+            if not cat_keys:
+                cat_keys = [category]
+            cat_cond = ' AND (' + ' OR '.join(['category LIKE ?'] * len(cat_keys)) + ')'
+            sql += cat_cond
+            params += [f'%{k}%' for k in cat_keys]
         sql += " LIMIT 500"
         rows = conn.execute(sql, params).fetchall()
         if not rows:
@@ -446,6 +469,9 @@ def find_list_item(name, category=None, top_n=5):
             if re.match(r'.*_\d+$', d.get('item_name') or ''): continue
             d['unit'] = infer_unit(d.get('item_name'), d.get('unit'))
             score = _candidate_score(name, d, category)
+            # v6.4: 超长拼接脏名(数据库占位残留, 如 '细石混凝土楼地面面层厚度、混凝压强度等级一尸...')降权
+            if len(str(d.get('item_name') or '')) > 40:
+                score *= 0.5
             d['_score'] = score
             d['_confidence'] = _confidence(score)
             d['_match_method'] = 'similarity'
