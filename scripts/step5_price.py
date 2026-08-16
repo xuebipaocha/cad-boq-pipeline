@@ -7,7 +7,7 @@
 - 管理费、利润、措施费各自按自身 base_calc 判断取费基数。
 - 费率专业名通过映射表查找，修复市政/安装/园林费率为0的问题。
 """
-import sys, os, json
+import sys, os, json, re
 sys.stdout.reconfigure(encoding='utf-8')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(BASE_DIR)
@@ -153,6 +153,43 @@ def _find_quota_by_material(kw, specialty, db, name):
     return None
 
 
+def _pick_best_candidate(rows, spec_text=''):
+    """v6.9.7 分档消歧: 候选名称含'≤数字'分档(如'热交换面积(m2)≤65≤100≤200≤260'、
+    '换热器设备重量(t)≤0.5≤1≤2≤5≤10')时, 按清单特征规格选档;
+    否则回退 名称最短+基价最高(原逻辑)。"""
+    if not rows:
+        return None
+    bands = [r for r in rows if '≤' in (r['item_name'] or '')]
+    if len(bands) >= 2:
+        # 分档系列分组: 名称相同的行属同一系列('≤65≤100≤200≤260'), 第 i 行 = 第 i 档
+        # (2-239~242 与 2-243~246 是不同系列, 边界串不同 — 必须分组选档)
+        groups = {}
+        for b in bands:
+            groups.setdefault(b['item_name'] or '', []).append(b)
+        # 特征规格数字(如 '80m²'/'2t'/'DN50'/'100kW')
+        m = re.search(r'(\d+\.?\d*)\s*(m2|m³|m3|t|kg|套|个|樘|mm|kw|kW|MPa)', spec_text or '')
+        for gname, g in groups.items():
+            bounds = [float(x) for x in re.findall(r'≤(\d+\.?\d*)', gname)]
+            if m and len(bounds) >= len(g):
+                v = float(m.group(1))
+                for i, b in enumerate(g):
+                    if v <= bounds[i]:
+                        q = dict(b)
+                        q['_score'] = 0.9
+                        q['_confidence'] = '高'
+                        q['_match_method'] = f'band_selected(≤{bounds[i]:g})'
+                        return q
+        # 无规格或规格不匹配任何系列 → 首系列中间档并标待核(不假装选对档)
+        g0 = next(iter(groups.values()))
+        mid = g0[len(g0) // 2]
+        q = dict(mid)
+        q['_score'] = 0.5
+        q['_confidence'] = '待确认'
+        q['_match_method'] = 'band_mid_uncertain'
+        return q
+    return None
+
+
 def _pick_quotas(item, specialty, db, combos, features_text=''):
     """多定额组合: 返回 [{quota, content, note}...]。无规则时回退单定额。
     features_text: 清单特征/做法表/施工说明合并文本, 用于子目条件判定。
@@ -221,13 +258,17 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
                         borrow = bool(rows)
                     conn.close()
                     if rows:
-                        # 取基价最高的前几个, 按名称最短优先(更接近主条目)
-                        cands = sorted(rows, key=lambda x: (len(x['item_name'] or ''), -(x['base_price'] or 0)))
-                        q = dict(cands[0])
+                        # v6.9.7: 分档消歧优先(特征规格选档), 否则名称最短+基价最高
+                        spec_txt = (item.get('features') or '') + ' ' + (features_text or '')
+                        cands = _pick_best_candidate(rows, spec_txt)
+                        if cands is None:
+                            cands = sorted(rows, key=lambda x: (len(x['item_name'] or ''), -(x['base_price'] or 0)))[0]
+                        q = dict(cands) if not isinstance(cands, dict) else cands
                         q['unit'] = db.infer_unit(q.get('item_name'), q.get('unit'))
-                        q['_score'] = 0.9
-                        q['_confidence'] = '高'
-                        q['_match_method'] = 'combo_hard'
+                        if q.get('_score') is None:
+                            q['_score'] = 0.9
+                            q['_confidence'] = '高'
+                            q['_match_method'] = 'combo_hard'
                         if borrow:
                             q['_borrowed'] = True  # 跨册借用标记
                     else:
@@ -708,6 +749,13 @@ def run(boq_json, output_dir):
             'main_unit': mp['main_unit'],
             'main_source': mp['main_source'],
         }
+        # v6.9.7: 主材并入 _price 回填(下游: 材料价格表/分析表消费)
+        item['_price'].update({
+            'main_material': main_mat,
+            'main_price': round(main_price, 2),
+            'main_unit': mp['main_unit'],
+            'main_source': mp['main_source'],
+        })
 
     r += 1
     ws.cell(row=r,column=1,value='分部分项合计').font=Font(name='微软雅黑', bold=True, size=10)
@@ -758,9 +806,119 @@ def run(boq_json, output_dir):
     ws.cell(row=r,column=18,value=round(grand,2)).font=Font(name='微软雅黑',bold=True,size=11)
     for c in range(1,len(headers)+1): ws.cell(row=r,column=c).border=bd
 
+    # v6.9.7 ⑫: 造价区间画像 — 单方造价对照工程类型经验区间(识图即心里有数)
+    try:
+        from indicators import INDICATORS, detect_structure_type
+        bfa = 0.0
+        recog_path2 = os.path.join(output_dir, '识图结果.json')
+        if os.path.exists(recog_path2):
+            with open(recog_path2, encoding='utf-8') as f2:
+                recog2 = json.load(f2)
+            areas2 = recog2.get('面积区域') or []
+            bfa = max((float(a.get('面积_m2', 0) or 0) for a in areas2), default=0)
+            nature2 = ' '.join(recog2.get('工程性质', []) or []) if isinstance(recog2.get('工程性质'), list) else str(recog2.get('工程性质', ''))
+            tc2 = ' '.join(recog2.get('施工说明', []) or []) + ' ' + nature2
+        if bfa > 0:
+            per_m2 = grand / bfa
+            structs = detect_structure_type([tc2 if 'tc2' in dir() else ''])
+            rng, note, src = None, None, None
+            for kw_list, r0, note0, src0 in INDICATORS['单方造价元/m²']:
+                if any(k in structs for k in kw_list):
+                    rng, note, src = r0, note0, src0
+                    break
+            if rng:
+                lo, hi = rng
+                verdict = '区间内' if lo <= per_m2 <= hi else ('低于区间' if per_m2 < lo else '超出区间')
+                print(f'  单方造价画像: {per_m2:.0f}元/m² [{verdict}] 参考{lo}-{hi} ({note[:20]}…)')
+                ws.cell(row=r+2, column=1, value=f'单方造价画像: {per_m2:.0f}元/m² ({verdict}, 参考{lo}-{hi}元/m², {src})').font = Font(name='微软雅黑', size=9, color='666666')
+                ws.merge_cells(start_row=r+2, start_column=1, end_row=r+2, end_column=19)
+    except Exception:
+        pass
+
     widths = [6,14,22,8,10,12,28,10,12,10,10,10,10,10,10,10,12,12,30]
     for idx,w in enumerate(widths,1):
         ws.column_dimensions[chr(64+idx) if idx<=26 else 'Z'].width = w
+
+    # v6.9.7 ⑳: 单位工程费汇总表(造价构成透明化 — 分部分项/措施/规费/税金/总造价)
+    try:
+        ws2 = wb.create_sheet('单位工程费汇总表')
+        hdr2 = ['费用名称', '取费基数', '费率', '金额(元)', '说明']
+        for i, h in enumerate(hdr2, 1):
+            c = ws2.cell(row=1, column=i, value=h); c.font = hft; c.fill = hf; c.border = bd
+        fee_rows = [
+            ('分部分项工程费', '—', '—', round(total_sum, 2), '清单合价合计(含未计价主材)'),
+            ('措施项目费-安全施工费', '分部分项费' if '分部分项' in safety_base_calc else '人工+机械', f'{safety_rate*100:.2f}%', round(safety_fee, 2), ''),
+            ('措施项目费-文明施工环境保护', '人工+机械', f'{_rate(env_info)*100:.2f}%', round(env_fee, 2), ''),
+            ('措施项目费-雨季施工费', '人工+机械', f'{_rate(rainy_info)*100:.2f}%', round(rainy_fee, 2), ''),
+            ('措施项目费-冬季施工费', '人工+机械', f'{_rate(winter_info)*100:.2f}%', round(winter_fee, 2), ''),
+            ('措施项目费小计', '—', '—', round(total_measures, 2), '费率型措施(工程量型见措施项目清单)'),
+            ('规费', '分部分项+措施', f'{reg_rate*100:.2f}%', round(social_fee, 2), ''),
+            ('增值税', '税前造价', f'{vat_rate*100:.2f}%', round(vat, 2), ''),
+            ('总造价', '—', '—', round(grand, 2), ''),
+        ]
+        for ri, (n, b, rt, amt, dn) in enumerate(fee_rows, 2):
+            vals = [n, b, rt, amt, dn]
+            bold = n in ('措施项目费小计', '总造价')
+            for ci, v in enumerate(vals, 1):
+                c = ws2.cell(row=ri, column=ci, value=v); c.border = bd
+                if bold:
+                    c.font = Font(name='微软雅黑', bold=True, size=10)
+        for ci, w2 in enumerate([26, 16, 10, 14, 40], 1):
+            ws2.column_dimensions[chr(64+ci)].width = w2
+    except Exception:
+        pass
+
+    # v6.9.7 ⑲: 主要材料价格表(带来源列 — 信息价/市场/经验/待询)
+    try:
+        ws3 = wb.create_sheet('主要材料价格表')
+        hdr3 = ['序号', '材料名称', '单位', '单价(元)', '来源', '备注']
+        for i, h in enumerate(hdr3, 1):
+            c = ws3.cell(row=1, column=i, value=h); c.font = hft; c.fill = hf; c.border = bd
+        seen = {}
+        for item in boq_items:
+            mm = (item.get('_price') or {}).get('main_material') or ''
+            if mm and mm not in seen:
+                seen[mm] = ((item['_price'].get('main_price'), item['_price'].get('main_unit'),
+                             item['_price'].get('main_source')))
+        ri = 2
+        for mm, (pr, mu, ms) in seen.items():
+            src_txt = {'dalian': '大连信息价', 'real_boq': '真实询价', 'experience': '经验价',
+                       'market_2026': '市场2026'}.get(ms or '', ms or '待询')
+            for ci, v in enumerate([ri-1, mm, mu, pr, src_txt, ''], 1):
+                c = ws3.cell(row=ri, column=ci, value=v); c.border = bd
+            ri += 1
+        if ri == 2:
+            ws3.cell(row=2, column=2, value='无已计价主材(全部待询)').border = bd
+        for ci, w3 in enumerate([6, 30, 8, 12, 14, 30], 1):
+            ws3.column_dimensions[chr(64+ci)].width = w3
+    except Exception:
+        pass
+
+    # v6.9.7 ⑱: 措施项目清单计价表(工程量型: 脚手架/模板/垂直运输 + 费率型 4 项)
+    try:
+        ws4 = wb.create_sheet('措施项目清单计价表')
+        hdr4 = ['序号', '措施项目', '单位', '工程量', '综合单价', '合价', '说明']
+        for i, h in enumerate(hdr4, 1):
+            c = ws4.cell(row=1, column=i, value=h); c.font = hft; c.fill = hf; c.border = bd
+        ri = 2
+        for item in boq_items:
+            nm = str(item.get('name', ''))
+            if any(k in nm for k in ('脚手架', '模板', '垂直运输', '脚手架拆除')):
+                p4 = item.get('_price') or {}
+                for ci, v in enumerate([ri-1, nm, item.get('unit', ''), item.get('qty', 0),
+                                        p4.get('unit_price', ''), p4.get('total', ''),
+                                        item.get('notes', '')], 1):
+                    c = ws4.cell(row=ri, column=ci, value=v); c.border = bd
+                ri += 1
+        for label, val in [('安全施工费', safety_fee), ('文明施工和环境保护费', env_fee),
+                           ('雨季施工费', rainy_fee), ('冬季施工费', winter_fee)]:
+            for ci, v in enumerate([ri-1, label, '项', 1, '', round(val, 2), '费率型措施'], 1):
+                c = ws4.cell(row=ri, column=ci, value=v); c.border = bd
+            ri += 1
+        for ci, w4 in enumerate([6, 26, 8, 10, 12, 14, 30], 1):
+            ws4.column_dimensions[chr(64+ci)].width = w4
+    except Exception:
+        pass
 
     xlsx_path = os.path.join(output_dir, '已组价清单.xlsx')
     wb.save(xlsx_path)
