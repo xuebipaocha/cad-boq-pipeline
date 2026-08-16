@@ -312,6 +312,15 @@ def cross_validate(results):
 def quality_report(drawing_data, results):
     warnings = cross_validate(results)
     area = _areas(drawing_data)
+    # v6.7: 造价经验指标自检 — 单方含量超限 → 复核意见(像造价人的"心里有数")
+    try:
+        from indicators import calc_indicators, review_opinions
+        drawing_data['造价指标'] = calc_indicators(drawing_data, results)
+        for op in review_opinions(drawing_data, results):
+            warnings.append({'级别': '中', '问题': op['意见'][:80],
+                             '建议': f"计算式: {op['计算式']}；经验区间: {op['经验区间']}（{op['来源']}）"})
+    except Exception:
+        pass
     if area <= 0:
         warnings.append({'级别':'高','问题':'缺少有效面积区域','建议':'检查闭合多段线或面积文字标注'})
     if not any(isinstance(l.get('厚度_mm'), (int,float)) and l.get('厚度_mm') > 0 for l in drawing_data.get('构造层',[])):
@@ -347,12 +356,12 @@ def export_excel(results, path, pending=None):
     bd = Border(left=Side(style='thin'),right=Side(style='thin'),top=Side(style='thin'),bottom=Side(style='thin'))
     ws.cell(row=1,column=1,value='工程量计算书').font = Font(name='微软雅黑', bold=True, size=16)
     ws.cell(row=1,column=1).alignment = Alignment(horizontal='center'); ws.merge_cells('A1:J1')
-    headers = ['序号','分项名称','单位','工程量','计算式','定额编号','规则来源','备注','计算来源','专业']
+    headers = ['序号','分项名称','单位','工程量','计算式','定额编号','规则来源','备注','计算来源','专业','部位']
     for i,h in enumerate(headers,1):
         c=ws.cell(row=3,column=i,value=h); c.font=hft; c.fill=hf; c.alignment=Alignment(horizontal='center'); c.border=bd
     r = 4
     for ri,item in enumerate(results):
-        vals=[ri+1,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业','')]
+        vals=[ri+1,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业',''),item.get('部位','')]
         for ci,v in enumerate(vals,1):
             ws.cell(row=r,column=ci,value=v).font=df; ws.cell(row=r,column=ci).border=bd; ws.cell(row=r,column=ci).alignment=Alignment(horizontal='center', wrap_text=True)
         r += 1
@@ -368,7 +377,7 @@ def export_excel(results, path, pending=None):
                 c=ws.cell(row=r,column=ci,value=v); c.font=df; c.border=bd; c.fill=pf
                 c.alignment=Alignment(horizontal='center', wrap_text=True)
             r += 1
-    for c,w in [('A',6),('B',26),('C',8),('D',10),('E',32),('F',12),('G',18),('H',18),('I',10),('J',10)]: ws.column_dimensions[c].width = w
+    for c,w in [('A',6),('B',26),('C',8),('D',10),('E',32),('F',12),('G',18),('H',18),('I',10),('J',10),('K',20)]: ws.column_dimensions[c].width = w
     wb.save(path)
 
 

@@ -29,9 +29,14 @@ def round_bar(d):
     sa = math.pi * d / 1000
     return round(wt, 2), round(sa, 3)
 
-def plate(t):
-    wt = t / 1000 * DENSITY
-    return round(wt, 2), 2.0
+def plate(w, t):
+    """钢板/扁钢: -120×20 → 宽120厚20
+    v6.6: 原实现 plate(t) 把宽度当厚度算(t/1000×7850), -120×20 算成 942kg/m
+    真实 18.84kg/m — 重量错 50 倍; 表面积固定 2.0 → 2×(宽+厚)/1000 (错 7 倍)
+    """
+    wt = w * t / 1e6 * DENSITY
+    sa = 2 * (w + t) / 1000
+    return round(wt, 2), round(sa, 3)
 
 def angle_steel(b, t, b2=None):
     """角钢: 等边 L75×6 或 不等边 L75×50×6
@@ -60,7 +65,7 @@ FUNCS = {
     'O': ('钢管', pipe, 2), 'Φ': ('钢管', pipe, 2),
     '□': ('方管', square_tube, 3),
     '●': ('圆钢', round_bar, 1),
-    '—': ('钢板', plate, 1),
+    '—': ('钢板', plate, 2),
     'L': ('角钢', angle_steel, 2),
 }
 
@@ -99,7 +104,9 @@ def parse_steel_spec(text):
             elif stype == 'O' and len(nums) >= 2: return ('O', nums[:2])
             elif stype == '□' and len(nums) >= 3: return ('□', nums[:3])
             elif stype == '●' and len(nums) >= 1: return ('●', nums[:1])
-            elif stype == '—' and len(nums) >= 1: return ('—', nums[:1])
+            elif stype == '—' and len(nums) >= 2:
+                # v6.6: 扁钢必须 [宽, 厚] — 原只传宽度(nums[:1]), 厚度丢失
+                return ('—', nums[:2])
             elif stype == 'L' and len(nums) >= 2: return ('L', nums[:2])
             elif stype == 'C' and len(nums) >= 4: return ('C', nums[:4])
     return None
@@ -121,15 +128,20 @@ def extract_steel_from_texts(texts):
             stype, params = spec
             # 估算长度（默认6m）
             length = 6.0
+            len_src = '估算'
             for kw, val in [('长',None),('L=',None),('l=',None)]:
                 m = re.search(rf'{kw}(\d+\.?\d*)', t)
-                if m: length = float(m.group(1)); break
+                if m:
+                    length = float(m.group(1))
+                    len_src = '文字标注'
+                    break
             wt_info = calc_weight_main(stype, params)
             if wt_info:
                 # v6.6: 名称截断 20 字符(与 v6.5 一致) — 恰好截掉 '钢柱/钢梁/檩条'
                 # 后缀, 分项名 'H400×200×8×13 L=9m 钢制作安装' 与人工清单一致;
                 # 输入改为原始 TEXT 后无需拼接编号(聚类串才有编号+规格粘连)
-                members.append({'名称': t[:20], '截面类型': stype, '截面参数': params, '长度_m': length})
+                members.append({'名称': t[:20], '截面类型': stype, '截面参数': params,
+                                '长度_m': length, '长度来源': len_src})
     return members
 
 # 从CAD标注中提取钢构件规格（替代方法）
