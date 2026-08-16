@@ -237,6 +237,27 @@ def build_features_map(cm):
     return feat
 
 
+def _append_estimated_block(xlsx_path, estimated_items):
+    """v6.6: 计价表尾部追加"待核实"区块 — 估算分项(量未核实)独立展示,
+    不进正式清单量。"""
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, Alignment
+    wb = load_workbook(xlsx_path)
+    ws = wb.active
+    r = ws.max_row + 2
+    ws.cell(row=r, column=2, value='▼ 待核实分项（估算值，不编造 — 图纸无精确证据，需人工核实后回填正式清单）') \
+        .font = Font(name='微软雅黑', bold=True, size=10, color='C00000')
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    r += 1
+    for ei in estimated_items:
+        ws.cell(row=r, column=2, value=ei['分项名称']).font = Font(name='微软雅黑', size=10)
+        ws.cell(row=r, column=4, value=ei['单位']).alignment = Alignment(horizontal='center')
+        ws.cell(row=r, column=5, value=ei['工程量']).alignment = Alignment(horizontal='center')
+        ws.cell(row=r, column=10, value=str(ei['计算式'])[:60]).font = Font(name='微软雅黑', size=10)
+        r += 1
+    wb.save(xlsx_path)
+
+
 def build_features_text(recog):
     """v5.17: 图纸做法/构造层/施工说明 → 项目特征文本(套定额依据)。
 
@@ -407,6 +428,7 @@ def run(calc_json, output_dir):
 
     cat = SPEC_CAT.get(specialty, specialty)
     boq_items = []
+    estimated_items = []  # v6.6: 估算分项(数据来源=估算)独立分流, 不进正式清单
     skipped = 0
     supplement_seq = 1  # v5.17: 自补清单序号
     pending_items = []  # v5.6: 待提取分项独立交付, 不进清单
@@ -438,7 +460,10 @@ def run(calc_json, output_dir):
         best = lst[0] if lst else {}
         score = best.get('_score', 0) or 0
         # v6.4: 房建专业拆除分项无合适国标项(拆除类多为市政/爆破), 强制自补防错配(如'楼梯墙拆除'→'楼梯')
-        if '拆除' in name and specialty in ('房屋建筑与装饰工程', '建筑与装饰工程'):
+        # v6.6: 大修泛化分项(门窗更换/雨水管更换/洞口面积)同样无对应国标科目 —
+        # '门窗更换'错配'门窗框槛'(仿古, 单位樘vs个)比自补更糟, 强制自补更诚实
+        if ('拆除' in name or '更换' in name or name == '门窗洞口面积') \
+                and specialty in ('房屋建筑与装饰工程', '建筑与装饰工程'):
             best, score = {}, 0.0
         # v4.0: 匹配确认阈值 0.35→0.5, 且低置信度(0.25-0.45)必须标记待复核
         # v5.17: 低置信度不标"待匹配"——按国标自补清单规则生成 B 类编码(专业码+B+序号)
@@ -482,6 +507,16 @@ def run(calc_json, output_dir):
         if not project_name:
             project_name = _extract_project_name(recog_data)
 
+        # v6.6: 估算分项质量卡口 — 数据来源=估算 不进正式清单(量未核实),
+        # 分流到独立"待核实清单"交付(可见/不编造/核实后人工回填)
+        if is_estimated:
+            estimated_items.append({
+                '分项名称': name, '单位': calc_unit, '工程量': qty,
+                '计算式': item.get('计算式', ''), '数据来源': '估算',
+                '备注': item.get('备注', ''),
+            })
+            continue
+
         boq_items.append({
             'seq': len(boq_items) + 1,
             'code': code,
@@ -513,6 +548,8 @@ def run(calc_json, output_dir):
         from pipeline.fill_boq import fill_boq_template
         xlsx = os.path.join(output_dir, '分部分项工程量清单计价表.xlsx')
         fill_boq_template(boq_items, TEMPLATE, xlsx)
+        if estimated_items:
+            _append_estimated_block(xlsx, estimated_items)
     else:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -532,6 +569,17 @@ def run(calc_json, output_dir):
             for ci,v in enumerate(vals,1):
                 ws.cell(row=r,column=ci,value=v).font=df; ws.cell(row=r,column=ci).border=bd
                 ws.cell(row=r,column=ci).alignment=Alignment(horizontal='center', wrap_text=True)
+        if estimated_items:
+            r += 1
+            ws.cell(row=r,column=2,value='▼ 待核实分项（估算值，不编造 — 图纸无精确证据，需人工核实后回填正式清单）').font = Font(name='微软雅黑', bold=True, size=10, color='C00000')
+            ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=9)
+            r += 1
+            for ei in estimated_items:
+                ws.cell(row=r,column=2,value=ei['分项名称']).font=df
+                ws.cell(row=r,column=4,value=ei['单位']).font=df
+                ws.cell(row=r,column=5,value=ei['工程量']).font=df
+                ws.cell(row=r,column=9,value=ei['计算式'][:60]).font=df
+                r += 1
         for c,w in [('A',6),('B',16),('C',28),('D',8),('E',10),('F',14),('G',10),('H',10),('I',24)]:
             ws.column_dimensions[c].width = w
         xlsx = os.path.join(output_dir, '分部分项工程量清单计价表.xlsx')
@@ -543,10 +591,10 @@ def run(calc_json, output_dir):
     if skipped:
         print(f'  ⚠ 跳过 {skipped} 个 0 量占位项（待CAD提取）')
     # v5.6: 数据来源统计
-    est_n = sum(1 for i in boq_items if i.get('data_source') == '估算')
+    est_n = len(estimated_items)
     pending_n = len(pending_items)
     if est_n or pending_n:
-        print(f'  ⚠ 估算值 {est_n} 项 | 待提取 {pending_n} 项（已拦截不进清单）')
+        print(f'  ⚠ 估算值 {est_n} 项（分流待核实清单）| 待提取 {pending_n} 项（已拦截不进清单）')
     print(f'  清单匹配: {matched}/{len(boq_items)} 项 | 质量分: {report["质量分"]} | 警告: {report["警告数量"]}条')
     print(f'  输出: {xlsx}')
     json_path = os.path.join(output_dir, '清单结果.json')
@@ -558,6 +606,12 @@ def run(calc_json, output_dir):
         with open(pend_path, 'w', encoding='utf-8') as f:
             json.dump(pending_items, f, ensure_ascii=False, indent=2)
         print(f'  待提取清单: {pend_path}')
+    # v6.6: 待核实清单独立交付(估算分项 — 不进正式清单量, 交付可见)
+    if estimated_items:
+        est_path = os.path.join(output_dir, '待核实清单.json')
+        with open(est_path, 'w', encoding='utf-8') as f:
+            json.dump(estimated_items, f, ensure_ascii=False, indent=2)
+        print(f'  待核实清单: {est_path}')
     with open(os.path.join(output_dir, '清单质量报告.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     return boq_items

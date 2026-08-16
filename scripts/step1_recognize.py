@@ -222,6 +222,22 @@ def build_layers(qty_items, raw_texts):
     for line in raw_texts:
         if any(k in line for k in ELEV_KW):
             continue
+        # v6.6: 施工说明长段落/规范引用/条款序号不是构造层 —
+        # 真实图纸设计说明常为整段文字, 原逻辑把'9）《抹灰砂浆技术规程》…'、
+        # '2. 走廊及楼梯间混凝土地面采用…' 全收成构造层(污染厚度均值)
+        if len(line) > 40:
+            continue
+        if re.search(r'GB\s?\d|JGJ|JG/T|规范|规程|图集|02J\d', line):
+            continue
+        if re.match(r'^[（(]?\d+[)）]?[.、．]\s*\S{8,}', line):
+            # v6.6: 条款序号(1. / （1）/ 1、)才排除 — 数字后直接跟 cm/mm 是厚度写法
+            # ('20cm级配碎石下基层'/'4cm细粒式沥青混凝土' 是构造层, 不得误伤)
+            continue
+        # v6.6: 构造层名称是材料/做法短语, 不含句子标点 — 段落性说明
+        # ('五、主要材料及构造设计…。'/'WMM5、DMM5M5 混合砂浆'/'楼2PVC…，走廊…')
+        # 混入会污染清单特征(step4 把全部构造层拼进 features)
+        if any(c in line for c in '。；，、；（）'):
+            continue
         # v4.3.1: 面积标注行排除(无论是否混入其他词)
         if _re.search(r'面积\s*\d+\.?\d*\s*m\s*[2²]', line):
             continue
@@ -368,13 +384,22 @@ def run(dwg_file, output_dir):
             from table_parser import parse_tables, table_to_layers
             tables_info = parse_tables(_msp)
             window_doors = []  # v6.0: 门窗表 → 门窗明细(墙扣门窗)
+            layers_from_table = []  # v6.6: 循环前初始化(首表为门窗表时 NameError 隐患)
+            table_layers_seen = set()  # v6.6: 多做法表累加去重(原为覆盖 — 多表图纸只剩最后一张)
             for tb in tables_info:
                 if tb['type'] == '做法表':
                     layers_from_table = table_to_layers(tb)
                     if layers_from_table:
-                        # 表格构造层优先于文字提取(表格是权威来源)
-                        construction_layers = layers_from_table
-                        print(f'  做法表: {len(layers_from_table)} 层 (表格优先)')
+                        # v6.6: 多张做法表逐张累加(真实图纸含 1+25+9+4+3+2 共6张做法表,
+                        # 原逻辑后表覆盖前表, 44 层构造层最后只剩 2 层 — 算量厚度/材料大面积丢失)
+                        added = 0
+                        for lt in layers_from_table:
+                            k = (lt.get('名称', ''), lt.get('材料', ''))
+                            if k not in table_layers_seen:
+                                table_layers_seen.add(k)
+                                construction_layers.append(lt)
+                                added += 1
+                        print(f'  做法表: +{added} 层 (累计 {len(construction_layers)} 层, 表格优先)')
                 elif tb['type'] == '门窗表':
                     # v6.5: 混排表(做法+门窗号+宽高数量) — 同时解析构造层与门窗明细
                     # (表头如 做法|厚度|材料|门窗号|洞口宽|洞口高|数量)
@@ -402,24 +427,49 @@ def run(dwg_file, output_dir):
                             cells = row.get('cells', [])
                             if len(cells) <= i_id:
                                 continue
-                            wd_id = str(cells[i_id]).strip()
-                            if not wd_id or not any(k in wd_id for k in ('M', 'C', '门', '窗')):
+                            # v6.6: 门窗说明段落混入表格行 → 不进明细
+                            row_text = ' '.join(str(c) for c in cells)
+                            if any(k in row_text for k in ('门窗说明', '玻璃', 'JGJ', 'GB', '开启', '性能', '安全玻璃')):
                                 continue
                             try:
-                                w = float(cells[i_w]) if i_w is not None and i_w < len(cells) else 0
-                                h = float(cells[i_h]) if i_h is not None and i_h < len(cells) else 0
-                                if (w <= 0 or h <= 0) and i_size is not None and i_size < len(cells):
-                                    m = re.search(r'(\d+)\s*[xX×]\s*(\d+)', str(cells[i_size]))
-                                    if m:
-                                        w, h = float(m.group(1)), float(m.group(2))
-                                n = int(float(cells[i_n])) if i_n is not None and i_n < len(cells) else 1
+                                # v6.6: 模式定位解析(不依赖固定列号) — 真实图纸门窗表数据行
+                                # 列错位(WM-1527挤到类型列/'LC-1010 LC-1118'行整体左移一列),
+                                # 且双门窗合并行('M-0927 M-0921'/'900X2100 900X2700'/'20 2')
+                                # 原固定列解析只取第一个匹配, M-0921/LC-1118 等大量丢失
+                                id_tokens, dims, nums = [], [], []
+                                for c in cells[:7]:
+                                    cs = str(c)
+                                    id_tokens += re.findall(r'[A-Za-z]{1,3}-?\d{2,4}', cs)
+                                    dims += re.findall(r'(\d+)\s*[xX×]\s*(\d+)', cs)
+                                    # 数量列: 纯数字序列(排除含X/-/字母的编号/尺寸列)
+                                    if re.fullmatch(r'\d+(?:\s+\d+)*', cs.strip()):
+                                        nums += [int(v) for v in re.findall(r'\d+', cs.strip())]
+                                if not id_tokens:
+                                    continue
+                                # 编号去噪: 排除 图纸目录类与尺寸串尾部 — '900X2100' 的
+                                # 'X2100' 会被编号正则误收(真实门窗号无 X 开头, X 是尺寸分隔符)
+                                id_tokens = [t for t in id_tokens
+                                             if t[0].isalpha() and not t.upper().startswith('X')]
+                                # 行列对齐: 数量个数与编号个数对齐(缺补1, 多截断)
+                                if len(nums) < len(id_tokens):
+                                    nums += [1] * (len(id_tokens) - len(nums))
+                                elif len(nums) > len(id_tokens):
+                                    nums = nums[:len(id_tokens)]
+                                for j, wd_id in enumerate(id_tokens):
+                                    w = h = 0
+                                    if j < len(dims):
+                                        w, h = float(dims[j][0]), float(dims[j][1])
+                                    if w <= 0 or h <= 0 and dims:
+                                        w, h = float(dims[0][0]), float(dims[0][1])
+                                    if w <= 0 or h <= 0:
+                                        continue
+                                    n = nums[j] if j < len(nums) else 1
+                                    window_doors.append({
+                                        '门窗号': wd_id, '宽_mm': w, '高_mm': h, '数量': n,
+                                        '洞口面积_m2': round(w * h / 1e6, 4),
+                                    })
                             except (ValueError, TypeError, IndexError):
                                 continue
-                            if w > 0 and h > 0:
-                                window_doors.append({
-                                    '门窗号': wd_id, '宽_mm': w, '高_mm': h, '数量': n,
-                                    '洞口面积_m2': round(w * h / 1e6, 4),
-                                })
             if window_doors:
                 print(f'  门窗表: {len(window_doors)} 个门窗 (墙扣门窗用)')
         except Exception as e:

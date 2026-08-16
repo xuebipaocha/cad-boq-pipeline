@@ -339,6 +339,11 @@ def run_vision_for_drawing(pid, dwg_file, output_dir):
                 print(f'  ⚠ 低置信度特写失败(跳过): {e}')
 
         if verdict.get('待核'):
+            # v6.6: 待核 → 图纸问题候选(视觉质检信号落地 — 21图全量A/B证实视觉对
+            # 工程类型无增量(21/21 vs 21/21), 但冲突报警灵敏度100%可靠; 此前待核
+            # 只写 pid['视觉验证'] 无任何下游消费, 相当于花了API钱只写日志)
+            pid.setdefault('图纸问题候选', []).append(
+                f'[视觉交叉验证] {verdict.get("裁决", "视觉与几何识图不一致, 建议人工复核图面")}')
             print(f"  ⚠ 视觉交叉验证: {verdict.get('裁决')}")
         return verdict
     except Exception as e:
