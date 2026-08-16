@@ -458,6 +458,26 @@ def run(boq_json, output_dir):
             else:
                 notes.append(f'主材[{main_mat[:20]} {main_price:.2f}/{mp["main_unit"] or "-"}({src_txt})]待补含量')
 
+        # v6.9: 单价合理性校验(价格直觉) — 综合单价超出经验区间±30% → 警告
+        try:
+            import os as _os, json as _json
+            _kp = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                                'data', 'knowledge', 'unit_prices.json')
+            if _os.path.exists(_kp):
+                with open(_kp, encoding='utf-8') as _f:
+                    _prices = _json.load(_f)
+                for _k, _e in _prices.items():
+                    if _k.startswith('_'):
+                        continue
+                    if any(kw in (name or '') for kw in _e.get('关键词', [])):
+                        lo, hi = _e['区间']
+                        if unit_price > 0 and not (lo * 0.7 <= unit_price <= hi * 1.3):
+                            notes.append(f'⚠单价{unit_price:.0f}{_e["单位"]}超出经验区间'
+                                         f'({lo}-{hi}, {_e.get("年份", "")}口径, 来源{_e.get("来源", "")[:18]})')
+                        break
+        except Exception:
+            pass
+
         # v5.17: 定额编号显示前缀(借/补)
         qc_disp = qc
         if qc:

@@ -276,6 +276,12 @@ def _attach_basis(drawing_data, results):
     try:
         from knowledge_query import query_rule
         specialty = drawing_data.get('专业类型', '')
+        # v6.9: 依据挂图纸证据 — 图名/图号+版本(版本意识: 每个数能对到哪版图纸)
+        meta = drawing_data.get('图纸元数据', {}) or {}
+        ver = drawing_data.get('图纸版本', {}) or {}
+        doc_ref = meta.get('图名', '') or ''
+        if ver.get('修订记录'):
+            doc_ref += f"({ver['修订记录'][0]})"
         for it in results:
             if it.get('依据'):
                 continue
@@ -290,7 +296,7 @@ def _attach_basis(drawing_data, results):
                     if r and r.get('规则'):
                         basis = f"{r.get('条款', '')}: {r['规则'][:60]}"
                         break
-            it['依据'] = basis or '待查证'
+            it['依据'] = (basis or '待查证') + (f'；图纸: {doc_ref}' if doc_ref else '')
     except Exception:
         for it in results:
             it.setdefault('依据', '待查证')
