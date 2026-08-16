@@ -34,8 +34,10 @@ LABOR_EXPECT = [
     (['成品门', '成品窗', '门安装', '窗安装', '防盗门', '防火门', '钢质门', '塑钢门', '塑钢窗'], 30, 'm²'),
     (['涂料', '喷刷', '乳胶漆', '真石漆'], 5, 'm²'),
     (['模板'], 20, 'm²'),
+    (['地砖', '块料', '楼地面', '石材地面', '陶瓷地砖'], 30, 'm²'),
     (['铺装', '园路', '广场'], 30, 'm²'),
-    (['挖土', '挖一般土方', '挖基坑', '挖沟槽'], 25, 'm³'),
+    (['挖土', '挖一般土方', '挖基坑', '挖沟槽', '人工挖'], 25, 'm³'),
+    (['机械挖'], 8, 'm³'),
     (['混凝土', '砼'], 45, 'm³'),
     (['砌体', '砌块', '砖墙', '实心砖'], 150, 'm³'),
     (['钢筋'], 600, 't'),
@@ -65,18 +67,20 @@ def _classify(name):
 
 
 def infer_base(labor, expect_price):
-    """labor ÷ 经验价 → 最接近的 1/10/100/1000。返回基数或 None(无法判断)。"""
+    """labor ÷ 经验价 → 基数(1/10/100/1000)。
+    v6.9.4: 倍数区间硬判(容忍经验价±3倍误差) — 原最近距离法在 labor 介于
+    两基数之间时(如四类土 532/25=21.3)判不出, 混编基数子目漏校准。"""
     if not labor or labor <= 0 or not expect_price:
         return None
     ratio = labor / expect_price
-    best, best_dist = None, None
-    for b in BASES:
-        d = abs(ratio - b) / b
-        if best_dist is None or d < best_dist:
-            best, best_dist = b, d
-    # 容差: 距最接近基数 40% 以内才采信(经验价±40% 波动可容忍)
-    if best_dist <= 0.4:
-        return best
+    if 0.3 <= ratio <= 3:
+        return 1
+    if 3 < ratio <= 30:
+        return 10
+    if 30 < ratio <= 300:
+        return 100
+    if 300 < ratio <= 3000:
+        return 1000
     return None
 
 
@@ -91,6 +95,7 @@ def build_calibration(conn_path=None, out_path=None, verbose=True):
     stats = {'校准': 0, '跳过': 0, '无匹配': 0}
     by_base = {}
     group_stats = {}  # (分类, 单位) → {基数: 次数}
+    detail = {}  # v6.9.4: 子目级校准表 — 同分类同单位混编基数(混凝土1/10/100)
     for r in rows:
         d = dict(r)
         cls = _classify(d['item_name'] or '')
@@ -105,6 +110,7 @@ def build_calibration(conn_path=None, out_path=None, verbose=True):
         calib[d['quota_code']] = {'基数': b,
                                    '分类': next(kws[0] for kws, p, u in LABOR_EXPECT if any(kw in (d['item_name'] or '') for kw in kws)),
                                    '单位': unit, 'labor': d['labor_cost']}
+        detail[f"{(d['item_name'] or '')[:50]}|{int(d['labor_cost'] or 0)}"] = b  # 子目级: 名称+人工费消歧(int统一)
         by_base[b] = by_base.get(b, 0) + 1
         stats['校准'] += 1
         # 分类+单位 → 基数统计(众数法, 输出规则表)
@@ -128,13 +134,18 @@ def build_calibration(conn_path=None, out_path=None, verbose=True):
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump({'规则': rules, '_说明': '成本基数规则表: step5 组价时按定额名称关键词+单位查基数, labor/material/machine 除以基数。'
                                         '由 quota_calibrate.py 从经验人工价反向校准生成(众数法)。'}, f, ensure_ascii=False, indent=1)
+    # v6.9.4: 子目级校准表(名称→基数) — 同分类混编基数时按子目精确校准
+    detail_path = os.path.join(DATA, 'quota_calibration_detail.json')
+    with open(detail_path, 'w', encoding='utf-8') as f:
+        json.dump(detail, f, ensure_ascii=False, indent=0)
     if verbose:
         print(f"校准完成: 校准{stats['校准']}条 / 跳过{stats['跳过']}条(无法判断) / 无匹配{stats['无匹配']}条")
         print(f"基数分布: {by_base}")
         print(f"规则数: {len(rules)}")
         for r in rules[:25]:
             print(f"  {r['关键词组']} {r['单位']} 基数={r['基数']} 样本={r['样本']} 占比={r['占比']}")
-        print(f"输出: {out_path}")
+        print(f"子目级校准: {len(detail)} 条")
+        print(f"输出: {out_path} + {detail_path}")
     return rules
 
 

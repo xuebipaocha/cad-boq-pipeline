@@ -22,6 +22,7 @@ def _rate(info):
 
 # v6.9.1: 定额成本基数校准规则缓存(见 quota_calibrate.py)
 _CALIBRATION = None
+_CALIBRATION_DETAIL = None
 
 
 def _load_calibration():
@@ -35,6 +36,20 @@ def _load_calibration():
         except Exception:
             _CALIBRATION = []
     return _CALIBRATION
+
+
+def _load_calibration_detail():
+    """v6.9.4: 子目级校准表(定额名称→基数) — 同分类混编基数时按子目精确校准。"""
+    global _CALIBRATION_DETAIL
+    if _CALIBRATION_DETAIL is None:
+        try:
+            p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'data', 'quota_calibration_detail.json')
+            with open(p, encoding='utf-8') as f:
+                _CALIBRATION_DETAIL = json.load(f)
+        except Exception:
+            _CALIBRATION_DETAIL = {}
+    return _CALIBRATION_DETAIL
 
 
 def _base_factor(info, db):
@@ -540,17 +555,17 @@ def run(boq_json, output_dir):
                 lab, mat, mach = db.decompose_cost(base, q.get('category') or specialty)
                 lab, mat, mach = lab * content, mat * content, mach * content
 
-            # v6.9.1: 定额成本基数校准 — 库重建丢失计量系数(成本按10/100倍单位编制),
-            # 规则表按(名称关键词,单位)查基数, 人材机除以基数
-            # (实测根因: 抹灰 12-1 成本按 100m² 编制, 未校准前人工 1801.58 元/m²)
+            # v6.9.1/4: 定额成本基数校准 — 先查子目级(名称精确), 再查规则表(分类+单位)
+            # (库重建丢失计量系数, 成本按10/100倍单位编制; 混凝土/挖土同分类混编基数)
             try:
-                _cal = _load_calibration()
-                _base = None
-                for _rule in _cal:
-                    _kws = _rule.get('关键词组') or []
-                    if any(_kw in (qname or '') for _kw in _kws) and quota_unit == _rule.get('单位'):
-                        _base = _rule['基数']
-                        break
+                _base = _load_calibration_detail().get(f"{(qname or '')[:50]}|{int(q.get('labor_cost') or 0)}")
+                if not _base:
+                    _cal = _load_calibration()
+                    for _rule in _cal:
+                        _kws = _rule.get('关键词组') or []
+                        if any(_kw in (qname or '') for _kw in _kws) and quota_unit == _rule.get('单位'):
+                            _base = _rule['基数']
+                            break
                 if _base and _base != 1:
                     lab = lab / _base
                     mat = mat / _base
