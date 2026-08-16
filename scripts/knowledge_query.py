@@ -77,6 +77,31 @@ def query_checklist(specialty, project_type_hint=''):
     return items
 
 
+def collect_unverified():
+    """收集知识库中 ⚠️/❌/待核 条目 → 待查证清单(交接下一轮联网查证, 不假装知道)。"""
+    out = []
+    for fname in ('process_chains.json', 'materials.json', 'calc_rules.json', 'unit_prices.json'):
+        try:
+            data = _load(fname)
+        except Exception:
+            continue
+        stack = [('', data)]
+        while stack:
+            path, node = stack.pop()
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k.startswith('_'):
+                        continue
+                    stack.append((f'{path}/{k}', v))
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    stack.append((f'{path}[{i}]', v))
+            elif isinstance(node, str):
+                if '⚠️' in node or '❌' in node or '待核' in node:
+                    out.append({'条目': path, '待查证': node[:100]})
+    return out[:30]
+
+
 def run_knowledge_checks(pid):
     """识图结果 → 知识库触发检查(边做边查)。
 

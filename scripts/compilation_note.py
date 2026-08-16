@@ -73,10 +73,33 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
     ]
     sections['编制口径'] = scope
 
-    # 四、遗留问题(图纸疑问/待核实/待提取)
+    # 四、遗留问题(图纸疑问/待核实/待提取) — v6.9: 每条带影响分项(图纸会审形态)
+    calc_names = [i.get('source_name', '') for i in boq_items] + \
+                 [e.get('分项名称', '') for e in (estimated_items or [])] + \
+                 [p.get('分项名称', '') for p in (pending_items or [])]
+
+    def _link(qtext):
+        """问题文本关键词 → 影响的算量/清单分项(前3个)。"""
+        if not qtext:
+            return ''
+        hits = []
+        for nm in calc_names:
+            if not nm:
+                continue
+            # 问题文本与分项名的公共关键词(2字以上)
+            for k in (qtext[i:i + 2] for i in range(len(qtext) - 1)):
+                if len(k) == 2 and k in nm and k not in ('影响', '分项', '计算', '图纸', '设计', '工程', '采用', '需要'):
+                    if nm not in hits:
+                        hits.append(nm)
+                    break
+            if len(hits) >= 3:
+                break
+        return ('（影响分项: ' + '、'.join(hits) + '）') if hits else ''
+
     issues = []
     for p in (problems or [])[:20]:
-        issues.append(f"□ {p.get('类别', '')}: {p.get('问题', '')[:60]}"
+        qt = f"{p.get('类别', '')}: {p.get('问题', '')[:60]}"
+        issues.append(f"□ {qt}{_link(qt)}"
                       f"{'（建议: ' + str(p.get('建议', ''))[:40] + '）' if p.get('建议') else ''}")
     for e in (estimated_items or [])[:20]:
         issues.append(f"□ 待核实(估算): {e.get('分项名称', '')} {e.get('工程量', '')}{e.get('单位', '')}"
@@ -84,7 +107,7 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
     for p in (pending_items or [])[:20]:
         issues.append(f"□ 待提取(无证据): {p.get('分项名称', '')} — {str(p.get('计算式', p.get('原因', '')))[:50]}")
     for c in (pid.get('图纸问题候选', []) or [])[:20]:
-        issues.append(f"□ 识图问题: {str(c)[:80]}")
+        issues.append(f"□ {str(c)[:80]}{_link(str(c))}")
     if not issues:
         issues.append("无（本次识图未发现遗留问题）")
     sections['遗留问题'] = issues

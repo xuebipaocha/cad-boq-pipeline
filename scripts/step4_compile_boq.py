@@ -540,6 +540,20 @@ def run(calc_json, output_dir):
         feat_layers = _match_features_for_item(name, recog_data)
         # v6.7: 特征条目式格式(真实工程计价表规律: 1.名称 2.规格型号 3.其他)
         feat_detail = '；'.join([p for p in (feat_spec, feat_layers) if p]) or '详见图纸'
+        # v6.9: 材料特性入特征(不看图能组价) — Q345B 等材质从材料库补特性
+        try:
+            from knowledge_query import query_material
+            for _mword in ('Q345', 'Q355', 'Q235', '砂浆', '涂料', '防水'):
+                _mat = query_material(specialty, _mword)
+                if _mat and (_mat.get('材料', '') in name or _mword in name):
+                    _extra = _mat.get('特性', '')[:60]
+                    if _extra and '详见图纸' in feat_detail:
+                        feat_detail = _extra
+                    elif _extra:
+                        feat_detail = f'{feat_detail}；{_extra}'
+                    break
+        except Exception:
+            pass
         features = (f'1.名称:{list_name or name}\n'
                     f'2.规格型号:{feat_detail}\n'
                     f'3.其他:满足图纸设计及规范要求')

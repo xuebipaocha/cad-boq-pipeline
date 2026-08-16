@@ -753,17 +753,35 @@ def run(dwg_file, output_dir):
     except Exception as e:
         print(f'  ⚠ OCR 兜底异常(跳过): {e}')
 
+    # ── v6.9: 图纸版本提取 — 修订记录(如'2026.2.26修改') → 版本意识(真造价师
+    # 最怕算错版本: 计算书必须能对到哪版图纸) ──
+    try:
+        import re as _re2
+        ver_hits = []
+        for t in (raw_texts or []):
+            m = _re2.search(r'(\d{4}[年./-]\d{1,2}[月./-]\d{1,2})[^0-9]{0,6}(修改|修订|变更|版)', t)
+            if m:
+                ver_hits.append(f'{m.group(1)}{m.group(2)}')
+        if ver_hits:
+            pid['图纸版本'] = {'修订记录': list(dict.fromkeys(ver_hits))[:5], '来源': '设计说明文字'}
+            print(f"  图纸版本: 修订记录 {len(ver_hits)} 处")
+    except Exception:
+        pass
+
     # ── v6.8: 知识库触发检查 — 线索词→工艺链/材料/规则/漏项(边做边查机制化) ──
     # 命中结果写入 pid['知识检查']; ⚠️待核口径自动转图纸疑问(图纸问题清单可见)
     try:
-        from knowledge_query import run_knowledge_checks
+        from knowledge_query import run_knowledge_checks, collect_unverified
         kc = run_knowledge_checks(pid)
         pid['知识检查'] = kc
+        # v6.9: 待查证清单 — 知识库未查实条目交接(诚实: 不假装知道)
+        pid['待查证'] = collect_unverified()
         if kc.get('图纸疑问建议'):
             for q in kc['图纸疑问建议']:
                 pid.setdefault('图纸问题候选', []).append(f'[知识库查证] {q[:100]}')
             print(f"  知识库: 工艺链命中{len(kc.get('工艺链命中', {}))}类 "
-                  f"规则依据{len(kc.get('规则依据', {}))}条 漏项检查{len(kc.get('漏项检查', []))}组")
+                  f"规则依据{len(kc.get('规则依据', {}))}条 漏项检查{len(kc.get('漏项检查', []))}组 "
+                  f"待查证{len(pid['待查证'])}条")
     except Exception as e:
         print(f'  ⚠ 知识库检查跳过: {e}')
 
