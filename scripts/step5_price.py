@@ -20,6 +20,23 @@ def _rate(info):
     return (info.get('rate') or 0) / 100
 
 
+# v6.9.1: 定额成本基数校准规则缓存(见 quota_calibrate.py)
+_CALIBRATION = None
+
+
+def _load_calibration():
+    global _CALIBRATION
+    if _CALIBRATION is None:
+        try:
+            p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             'data', 'quota_calibration.json')
+            with open(p, encoding='utf-8') as f:
+                _CALIBRATION = json.load(f).get('规则', [])
+        except Exception:
+            _CALIBRATION = []
+    return _CALIBRATION
+
+
 def _base_factor(info, db):
     return db.base_factor_from_calc(info.get('base_calc', ''))
 
@@ -141,6 +158,19 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
             return subs
     # 回退: 单定额(原逻辑)
     q = None
+    # v6.9.1: 泛化项(门窗更换/拆除/洞口面积)强制自补 — 模糊匹配实测错配到
+    # 高价装饰定额('门窗框小型构件装饰线条增加费' 5630元/m²), 自补最诚实
+    if '门窗' in name and any(k in name for k in ('更换', '拆除', '洞口面积')):
+        q = {
+            'quota_code': f'{_SUPPLEMENT_SEQ[0]:03d}',
+            'item_name': f'{name}（自补定额）',
+            'unit': item.get('unit') or '',
+            'base_price': 0, 'labor_cost': 0, 'material_cost': 0, 'machine_cost': 0,
+            '_score': 0, '_confidence': '待确认', '_match_method': 'supplement',
+            '_supplement': True,
+        }
+        _SUPPLEMENT_SEQ[0] += 1
+        return [{'quota': q, 'content': 1.0, 'note': '自补定额，人材机待补充（泛化项防错配）'}]
     if mapped:
         q = mapped[0]
         q['_selected_from'] = 'mapping'
@@ -385,6 +415,25 @@ def run(boq_json, output_dir):
             if lab == 0 and mat == 0 and mach == 0 and base > 0:
                 lab, mat, mach = db.decompose_cost(base, q.get('category') or specialty)
                 lab, mat, mach = lab * content, mat * content, mach * content
+
+            # v6.9.1: 定额成本基数校准 — 库重建丢失计量系数(成本按10/100倍单位编制),
+            # 规则表按(名称关键词,单位)查基数, 人材机除以基数
+            # (实测根因: 抹灰 12-1 成本按 100m² 编制, 未校准前人工 1801.58 元/m²)
+            try:
+                _cal = _load_calibration()
+                _base = None
+                for _rule in _cal:
+                    _kws = _rule.get('关键词组') or []
+                    if any(_kw in (qname or '') for _kw in _kws) and quota_unit == _rule.get('单位'):
+                        _base = _rule['基数']
+                        break
+                if _base and _base != 1:
+                    lab = lab / _base
+                    mat = mat / _base
+                    mach = mach / _base
+                    base = base / _base
+            except Exception:
+                pass
 
             mgmt_base = (lab + mach) * _base_factor(mgmt_info, db)
             profit_base = (lab + mach) * _base_factor(profit_info, db)

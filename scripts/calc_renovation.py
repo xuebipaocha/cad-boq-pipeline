@@ -457,10 +457,12 @@ def calc(data):
                 return 'LC' in wid or wid.startswith('C') or '窗' in wid
             n_doors = sum(int(w.get('数量', 1) or 1) for w in windows if _is_door(str(w.get('门窗号', ''))))
             n_wins = sum(int(w.get('数量', 1) or 1) for w in windows if _is_win(str(w.get('门窗号', ''))))
-            r.append(_q('门窗更换', '樘', n_doors + n_wins,
-                        f'门{n_doors}樘+窗{n_wins}樘(门窗表)', SRC_TEXT))
-            r.append(_q('门窗拆除', '樘', n_doors + n_wins,
-                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 与更换配套)', SRC_TEXT))
+            r.append(_q('门窗更换', 'm²', total_area,
+                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 洞口面积合计{total_area}m²)'
+                        '；按GB50854§4.0.8双单位选m²(与定额计量单位一致, 樘数见备注)', SRC_TEXT))
+            r.append(_q('门窗拆除', 'm²', total_area,
+                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 洞口面积合计{total_area}m²)'
+                        '；按GB50854§4.0.8双单位选m²', SRC_TEXT))
             r.append(_q('门窗洞口面积', 'm²', total_area,
                         f'{total_area}m²(门窗表洞口合计, 墙扣减用)', SRC_TEXT))
         else:
