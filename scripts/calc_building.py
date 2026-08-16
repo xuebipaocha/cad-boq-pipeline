@@ -102,13 +102,25 @@ def _floor_count(texts):
     return 1
 
 def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0):
-    """钢筋量: 平法标注结构化解析(v4.2) > 配筋率(全构件体积) > 含钢量 > 默认65kg/m²"""
+    """钢筋量: 平法标注结构化解析(v4.2) > 配筋率(全构件体积) > 含钢量 > 默认65kg/m²
+    v6.9.5 思维层②: 返回附'参考对比' — 平法/配筋率/含钢量多法互证(偏差>30%提示)。
+    """
     from rebar_parse2 import parse_rebar_notes, calc_total_steel
     parsed = parse_rebar_notes(texts)
     if parsed['beams'] or parsed['columns'] or parsed['slabs']:
         total, detail = calc_total_steel(parsed, bfa, col_h=col_h, beam_len=beam_len)
         if total > 0:
-            return total, f'平法结构化解析: {detail}'
+            # 参考法: 含钢量(kg/m² 说明值或 65 默认)
+            tc = ' '.join(texts)
+            m = re.search(r'(\d+\.?\d*)\s*kg/[m㎡]', tc)
+            ref_kg = float(m.group(1)) if m else 65
+            ref = round(bfa * ref_kg / 1000, 2)
+            note = f'平法结构化解析: {detail}'
+            if abs(total - ref) / max(total, ref) > 0.3:
+                note += f'；⚠含钢量法参考 {ref}t(偏差{(total-ref)/max(total,ref)*100:.0f}%), 需复核'
+            else:
+                note += f'；含钢量法印证 {ref}t(偏差{(total-ref)/max(total,ref)*100:.0f}%)'
+            return total, note
     from rebar_calc import calc_rebar_total
     total, note, detail = calc_rebar_total(texts, bfa)
     if total:

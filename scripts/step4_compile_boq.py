@@ -680,6 +680,31 @@ def run(calc_json, output_dir):
             recog_data['造价指标'] = qrep.get('造价指标', {})
         except Exception:
             pass
+
+        # v6.9.5 思维层④: 漏项自动对照 — 工程类型检查表 ↔ 全部算量/清单分项,
+        # 检查表常见项在分项中无对应 → 生成疑似漏项(造价人交付前过项检查)
+        try:
+            from knowledge_query import query_checklist
+            nature = recog_data.get('工程性质', '')
+            cl = query_checklist(specialty, '大修与改造' if '大修' in nature else '')
+            all_names = ' '.join(
+                [str(i.get('source_name', '')) for i in boq_items] +
+                [str(e.get('分项名称', '')) for e in estimated_items] +
+                [str(p.get('分项名称', '')) for p in pending_items] +
+                [str(c) for c in (recog_data.get('图纸问题候选', []) or [])])
+            miss = []
+            for k, v in cl.items():
+                for item in v:
+                    if len(item) < 2:
+                        continue
+                    # 2字主干匹配(宽松): '垃圾清运'→'垃圾' 或 '清运'
+                    if not any(w in all_names for w in (item, item[:2], item[2:4] if len(item) > 3 else item)):
+                        miss.append(item)
+            recog_data['漏项对照'] = miss
+            if miss:
+                print(f"  漏项对照: 疑似漏项 {len(miss)} 项 ({'、'.join(miss[:8])})")
+        except Exception:
+            pass
         note = build_note(recog_data, [], boq_items, pending_items, estimated_items,
                           problems=json.load(open(os.path.join(output_dir, '审图记录.json'), encoding='utf-8')).get('problems') if os.path.exists(os.path.join(output_dir, '审图记录.json')) else None,
                           project_name=project_name)
