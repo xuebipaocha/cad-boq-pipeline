@@ -190,6 +190,83 @@ def _pick_best_candidate(rows, spec_text=''):
     return None
 
 
+def _material_tier(name, unit, price):
+    """v6.9.8 ⑭ 材料档次标注: 按类别经验档位线判定低/中/高 + 替代建议。
+    档位线(2026 市场参考, ⚠️通行经验): 门窗m² 250/400、防水m² 25/40、
+    混凝土m³ 280/330、钢筋t 3000/3400、型钢t 3200/3800、一般材料 m² 100/300。
+    """
+    try:
+        price = float(price or 0)
+    except (TypeError, ValueError):
+        return '', ''
+    if price <= 0:
+        return '', ''
+    u = (unit or '').lower()
+    if 'm2' in u or '㎡' in u or u == 'm²':
+        if any(k in name for k in ('窗', '门')):
+            lo, hi = 250, 400
+        elif any(k in name for k in ('防水', '卷材', '涂料')):
+            lo, hi = 25, 40
+        else:
+            lo, hi = 100, 300
+    elif 'm3' in u or 'm³' in u:
+        if '混凝土' in name or '砼' in name:
+            lo, hi = 280, 330
+        else:
+            lo, hi = 300, 600
+    elif u == 't':
+        if any(k in name for k in ('钢筋', '螺纹钢')):
+            lo, hi = 3000, 3400
+        else:
+            lo, hi = 3200, 3800
+    elif 'kg' in u:
+        lo, hi = 10, 30
+    else:
+        lo, hi = 0, 0
+    if not lo:
+        return '', ''
+    if price < lo:
+        return '低档', '价格低于主流档位, 关注材质/品牌是否满足设计要求'
+    if price > hi:
+        return '高档', '价格高于主流档位, 可询同类中档替代(如国产替代进口)'
+    return '中档', ''
+
+
+def _resolve_content(content, features_text=''):
+    """v6.9.8 组合规则动态含量: 含量支持表达式(真实工程填表规律 —
+    含量 = 单位换算 × 厚度/损耗系数; 负含量 *-1 减层)。
+    数字/负数字 → float; '厚度/3' → 特征厚度÷3; '运距/1000' → 特征运距÷1000。
+    """
+    import re as _re
+    if content is None:
+        return 1.0
+    if isinstance(content, (int, float)):
+        return float(content)
+    s = str(content).strip()
+    if not s:
+        return 1.0
+    m = _re.match(r'^-?\d+\.?\d*$', s)
+    if m:
+        return float(s)
+    # 表达式: '厚度/3' '厚度×1.05' '运距/1000' '损耗×1.05'
+    m = _re.search(r'(厚度|运距|损耗)\s*([×x*/])\s*(\d+\.?\d*)', s)
+    if m:
+        kw, op, base = m.group(1), m.group(2), float(m.group(3))
+        feat = features_text or ''
+        if kw == '厚度':
+            fm = _re.search(r'(\d+\.?\d*)\s*mm\s*厚|厚\s*(\d+\.?\d*)\s*mm|厚度[为]?\s*(\d+\.?\d*)', feat)
+            v = float(fm.group(1) or fm.group(2) or fm.group(3)) if fm else None
+        elif kw == '运距':
+            fm = _re.search(r'运距[为]?\s*(\d+\.?\d*)\s*m', feat)
+            v = float(fm.group(1)) if fm else None
+        else:
+            v = None
+        if v is None:
+            return 1.0  # 特征无参数 → 不换算(保持基准含量)
+        return round(v / base, 4) if op == '/' else round(v * base, 4)
+    return 1.0
+
+
 def _pick_quotas(item, specialty, db, combos, features_text=''):
     """多定额组合: 返回 [{quota, content, note}...]。无规则时回退单定额。
     features_text: 清单特征/做法表/施工说明合并文本, 用于子目条件判定。
@@ -279,7 +356,7 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
             if q:
                 q = dict(q)
                 q['_selected_from'] = q.get('_match_method', 'combo')
-                subs.append({'quota': q, 'content': float(sub.get('含量', 1.0)),
+                subs.append({'quota': q, 'content': _resolve_content(sub.get('含量', 1.0), features_text),
                              'note': sub.get('备注', '')})
             else:
                 # v5.17: 自补定额 — 本册/跨册均无合适子目, 生成自补条目(人材机待人工补充)
@@ -292,7 +369,7 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
                     '_supplement': True,
                 }
                 _SUPPLEMENT_SEQ[0] += 1
-                subs.append({'quota': q, 'content': float(sub.get('含量', 1.0)),
+                subs.append({'quota': q, 'content': _resolve_content(sub.get('含量', 1.0), features_text),
                              'note': '自补定额，人材机待补充'})
         if subs:
             return subs
@@ -884,7 +961,11 @@ def run(boq_json, output_dir):
         for mm, (pr, mu, ms) in seen.items():
             src_txt = {'dalian': '大连信息价', 'real_boq': '真实询价', 'experience': '经验价',
                        'market_2026': '市场2026'}.get(ms or '', ms or '待询')
-            for ci, v in enumerate([ri-1, mm, mu, pr, src_txt, ''], 1):
+            tier, advice = _material_tier(mm, mu or '', pr or 0)
+            tier_txt = f'档位:{tier}' if tier else ''
+            if advice:
+                tier_txt += f' {advice}'
+            for ci, v in enumerate([ri-1, mm, mu, pr, src_txt, tier_txt], 1):
                 c = ws3.cell(row=ri, column=ci, value=v); c.border = bd
             ri += 1
         if ri == 2:

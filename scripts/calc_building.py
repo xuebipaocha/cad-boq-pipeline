@@ -106,9 +106,16 @@ def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0):
     v6.9.5 思维层②: 返回附'参考对比' — 平法/配筋率/含钢量多法互证(偏差>30%提示)。
     """
     from rebar_parse2 import parse_rebar_notes, calc_total_steel
+
+    def _concrete_grade(texts):
+        # v6.9.8: 混凝土等级从施工说明提取(C25/C30/C35/C40) → 16G101 锚固查表
+        tc = ' '.join(texts or [])
+        m = re.search(r'\bC([234]\d)\b', tc)
+        return f'C{m.group(1)}' if m else 'C30'
     parsed = parse_rebar_notes(texts)
     if parsed['beams'] or parsed['columns'] or parsed['slabs']:
-        total, detail = calc_total_steel(parsed, bfa, col_h=col_h, beam_len=beam_len)
+        total, detail = calc_total_steel(parsed, bfa, col_h=col_h, beam_len=beam_len,
+                                         concrete=_concrete_grade(texts))
         if total > 0:
             # 参考法: 含钢量(kg/m² 说明值或 65 默认)
             tc = ' '.join(texts)
@@ -267,6 +274,14 @@ def calc(data):
         vol = round(found_count * 0.5, 2)
         con_vol_total += vol
         r.append({'分项名称':'独立基础','单位':'m³','工程量':vol,'计算式':f'{found_count}个×0.5m³(估算)','定额编号':'','备注':'CAD实测'})
+        # v6.9.8 ⑨: 挖基础土方分级 — 有基础证据时按 基础体积×1.15(工作面+放坡)
+        r.append({'分项名称':'挖基础土方','单位':'m³','工程量':round(vol * 1.15, 2),
+                  '计算式':f'基础体积{vol}×1.15(工作面+放坡系数,估算)', '定额编号':'',
+                  '备注':'估算', '数据来源':'估算'})
+    else:
+        r.append({'分项名称':'挖基础土方','单位':'m³','工程量':0,
+                  '计算式':'待提取: 无基础图证据, 不得按建筑面积估算土方',
+                  '定额编号':'', '备注':'待提取', '数据来源':'待提取'})
 
     # ── 柱 ──
     if col_count > 0:

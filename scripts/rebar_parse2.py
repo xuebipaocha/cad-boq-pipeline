@@ -20,9 +20,21 @@ STEEL_WEIGHT = {
     32: 6.313, 36: 7.990, 40: 9.865,
 }
 
-# 22G101 受拉钢筋锚固长度 laE (mm), 抗震等级一级, 混凝土C30 简化表
-# 按钢筋直径分段: 25以内/25以上 (C30 时 HRB400 laE=37d/41d)
-ANCHOR_LEN = {'HRB400': 37, 'HRB400E': 37, 'HRB335': 30, 'HPB300': 26}
+# 16G101-1 受拉钢筋抗震锚固长度 laE (d 倍数) — v6.9.8 按混凝土等级×钢筋等级查表
+# (16G101-1 §5.2 表, 抗震等级一级; C30 时 HRB400 laE=37d 与原实现一致)
+ANCHOR_LEN = {
+    'HRB400': {'C25': 40, 'C30': 37, 'C35': 34, 'C40': 31},
+    'HRB400E': {'C25': 40, 'C30': 37, 'C35': 34, 'C40': 31},
+    'HRB335': {'C25': 33, 'C30': 30, 'C35': 27, 'C40': 25},
+    'HPB300': {'C25': 29, 'C30': 26, 'C35': 24, 'C40': 22},
+}
+_ANCHOR_DEFAULT = 37
+
+
+def _anchor(grade, concrete):
+    """按等级查锚固倍数; 未知等级 → 默认 37d。"""
+    tbl = ANCHOR_LEN.get(grade or 'HRB400', {})
+    return tbl.get(concrete or 'C30', _ANCHOR_DEFAULT)
 
 
 def weight_per_m(d):
@@ -95,7 +107,7 @@ class BeamRebar:
     def steel_kg(self, beam_len_m, concrete='C30', grade='HRB400'):
         """计算梁钢筋总重(kg)"""
         total = 0.0
-        lae = ANCHOR_LEN.get(grade, 37)
+        lae = _anchor(grade, concrete)
         # 主筋: 每根 = 梁长 + 两端锚固
         for n, d in self.top_bars + self.bottom_bars:
             per = weight_per_m(d)
@@ -162,10 +174,10 @@ class ColumnRebar:
             self.stirrup_sp = int(m.group(2))
         return self
 
-    def steel_kg(self, col_h_m, grade='HRB400'):
+    def steel_kg(self, col_h_m, concrete='C30', grade='HRB400'):
         """柱钢筋总重(kg)"""
         total = 0.0
-        lae = ANCHOR_LEN.get(grade, 37)
+        lae = _anchor(grade, concrete)
         for n, d in self.main_bars:
             per = weight_per_m(d)
             # 纵筋: 柱高 + 上下锚固/搭接
@@ -262,16 +274,16 @@ def parse_rebar_notes(texts):
     return {'beams': beams, 'columns': columns, 'slabs': slabs}
 
 
-def calc_total_steel(parsed, bfa, col_h=3.0, beam_len=6.0):
-    """综合计算钢筋量(t)"""
+def calc_total_steel(parsed, bfa, col_h=3.0, beam_len=6.0, concrete='C30'):
+    """综合计算钢筋量(t) — v6.9.8 混凝土等级透传(16G101 锚固查表)。"""
     total_kg = 0.0
     details = []
     for b in parsed['beams']:
-        kg = b.steel_kg(beam_len)
+        kg = b.steel_kg(beam_len, concrete=concrete)
         total_kg += kg
         details.append(f'{b.name}: {kg:.0f}kg')
     for c in parsed['columns']:
-        kg = c.steel_kg(col_h)
+        kg = c.steel_kg(col_h, concrete=concrete)
         total_kg += kg
         details.append(f'{c.name}: {kg:.0f}kg')
     for s in parsed['slabs']:

@@ -82,7 +82,9 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
                  [p.get('分项名称', '') for p in (pending_items or [])]
 
     def _link(qtext):
-        """问题文本关键词 → 影响的算量/清单分项(前3个)。"""
+        """问题文本关键词 → 影响的算量/清单分项(前3个) + v6.9.8 影响金额。
+        金额 = 命中分项 Σ(工程量 × 综合单价); 无单价(未组价) → '金额待估'。
+        """
         if not qtext:
             return ''
         hits = []
@@ -97,7 +99,22 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
                     break
             if len(hits) >= 3:
                 break
-        return ('（影响分项: ' + '、'.join(hits) + '）') if hits else ''
+        if not hits:
+            return ''
+        # 影响金额: 命中分项的量×单价(boq_items 含 _price.total)
+        amt = 0.0
+        priced = 0
+        for it in boq_items:
+            nm = it.get('source_name') or it.get('name') or ''
+            if nm in hits:
+                tp = (it.get('_price') or {}).get('total') or 0
+                try:
+                    amt += float(tp)
+                    priced += 1
+                except (TypeError, ValueError):
+                    pass
+        amt_txt = f'，影响金额约{amt:,.0f}元' if priced and amt > 0 else '，影响金额待估(该分项未定价)'
+        return f'（影响分项: {"、".join(hits)}{amt_txt}）'
 
     issues = []
     for p in (problems or [])[:20]:
@@ -143,6 +160,19 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
         sections['漏项自动对照(疑似漏项)'] = [
             f"□ {mm} — 图纸{pid.get('工程性质', '')}类型常见项, 本次分项中未见对应, 请核实是否遗漏"
             for mm in miss]
+
+    # v6.9.8 ⑮: 审计复核结论聚合 — 指标/互斥/画像/漏项 报警信号 → 人话结论
+    conclusions = []
+    for k, v in inds.items():
+        st = v.get('状态', '')
+        if '异常' in st or '超出' in st or '低于' in st:
+            conclusions.append(
+                f"指标{('「' + k + '」')}: 实际 {v.get('实际', '')} 超出经验区间 {v.get('区间', '')}"
+                f"({v.get('来源', '')}) — 需按计算式复核, 若为多做法叠加需分劈")
+    if not conclusions:
+        conclusions.append("主要含量指标均在经验区间内, 量级合理")
+    sections['复核结论'] = conclusions
+
     return sections
 
 
