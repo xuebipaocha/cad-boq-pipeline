@@ -687,7 +687,26 @@ def run(dwg_file, output_dir):
         }
     elif specialty == '钢结构工程':
         from steel_weight import extract_steel_from_texts
-        mems = extract_steel_from_texts(raw_texts)
+        # v6.6: 用原始 TEXT 短文本提取 — 聚类拼接串('L50x5'+'2'→'L50x52')把
+        # 角钢/扁钢参数拼坏(L50x52 无意义→负重量-0.01t), 原始标注行才干净
+        steel_texts = raw_texts
+        if _msp is not None:
+            try:
+                raw = set()
+                for e in _msp:
+                    tt = ''
+                    try:
+                        tt = (e.dxf.text if e.dxftype() == 'TEXT' else e.text) or ''
+                    except Exception:
+                        continue
+                    tt = tt.strip().replace('\n', ' ')
+                    if tt:
+                        raw.add(tt)
+                # 原始短文本优先(构件标注行), 聚类长串兜底
+                steel_texts = sorted(raw)
+            except Exception:
+                pass
+        mems = extract_steel_from_texts(steel_texts)
         pid['钢结构'] = {'构件': mems}
         if mems: print(f'  钢结构: 识别{len(mems)}个构件')
 
