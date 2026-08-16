@@ -60,31 +60,58 @@ def fill_boq_template(boq_items, template_path, output_path):
                     pass  # 合并单元格跳过
 
         # 填数据（按分部归类）— 含综合单价/合价(来自 _price)
+        # v6.9.6: 分部小计+全表合计(真实表格规律: 分部名行→清单项→分部小计→总合计)
         r = 5
         current_cat = None
+        cat_total = 0.0
+        grand_total = 0.0
         for item in boq_items:
             cat = item.get('section', item.get('category', '一般工程'))
-            if current_cat != cat:
-                if r > 5:
-                    r += 1  # 分部间空行
-                try:
-                    ws.cell(row=r, column=3, value=cat).font = bfont
-                except:
-                    pass
-                r += 1
-                current_cat = cat
-
             p = item.get('_price') or {}
             unit_price = p.get('unit_price', '')
             total_price = p.get('total', '')
+            if current_cat != cat:
+                if r > 5:
+                    # 上一分部小计行
+                    try:
+                        ws.cell(row=r, column=3, value='小计').font = bfont
+                        ws.cell(row=r, column=10, value=round(cat_total, 2) if cat_total else '').font = bfont
+                    except Exception:
+                        pass
+                    r += 1  # 分部间空行
+                try:
+                    ws.cell(row=r, column=3, value=cat).font = bfont
+                except Exception:
+                    pass
+                r += 1
+                current_cat = cat
+                cat_total = 0.0
+            try:
+                cat_total += float(total_price or 0)
+                grand_total += float(total_price or 0)
+            except (TypeError, ValueError):
+                pass
             for ci, v in [(1, item['seq']), (2, item.get('code', '')), (3, item['name']),
                           (4, item.get('features', '')), (6, item['unit']), (7, item['qty']),
                           (9, unit_price), (10, total_price)]:
                 try:
                     ws.cell(row=r, column=ci, value=v).font = dfont
-                except:
+                except Exception:
                     pass  # 合并单元格跳过
             r += 1
+        # 末分部小计 + 全表合计
+        if current_cat:
+            try:
+                ws.cell(row=r, column=3, value='小计').font = bfont
+                ws.cell(row=r, column=10, value=round(cat_total, 2) if cat_total else '').font = bfont
+            except Exception:
+                pass
+            r += 1
+        try:
+            ws.cell(row=r, column=3, value='合计').font = Font(name='微软雅黑', bold=True, size=11)
+            ws.cell(row=r, column=10, value=round(grand_total, 2) if grand_total else '').font = bfont
+        except Exception:
+            pass
 
     # ── Sheet 2: 表E.2.2-3 综合单价分析表 ──
     if '表E.2.2-3 分部分项工程项目、技术措施清单综合单价分析表' in wb.sheetnames:
