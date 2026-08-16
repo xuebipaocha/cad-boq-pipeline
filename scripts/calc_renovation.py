@@ -238,6 +238,36 @@ def _interior_finishing(data):
                 note += f'; 面积=房间{area_sum}m²×{floors}层({n_rooms}间, 实测房间分区)'
                 items.append(_q(f'室内顶棚{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
                 continue
+        if room_hits and room_miss:
+            # v6.9.5 思维层①: 部分命中分劈 — 做法位置部分命中房间几何(如
+            # PVC'办公室，走廊，楼梯间'只命中办公室) → 实测部分 + 未命中部位待提取
+            # (造价人思维: 不能把未知部位按全面积估算, 也不编造; 实测+待核拆开)
+            area_sum = sum(float(rr.get('面积_m2', 0) or 0) for rr in room_hits)
+            perim_sum = sum(float(rr.get('周长_m', 0) or 0) for rr in room_hits)
+            n_rooms = sum(int(rr.get('数量', 1) or 1) for rr in room_hits)
+            miss_txt = '、'.join(room_miss[:3])
+            if code.startswith('楼'):
+                q = round(area_sum * floors, 2)
+                note += f'; 面积=房间{area_sum}m²×{floors}层({n_rooms}间实测)'
+                items.append(_q(f'室内楼地面{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                items.append(_q(f'室内楼地面{name}({miss_txt}待核)', 'm²', 0,
+                                f'待提取: 部位[{miss_txt}]无房间几何证据, 不得按全面积估算',
+                                SRC_PENDING, 部位=pos))
+                continue
+            elif code.startswith('墙'):
+                q = round(perim_sum * floor_h * floors, 2)
+                note += f'; 面积=房间周长{perim_sum}m×层高{floor_h}×{floors}层({n_rooms}间实测)'
+                items.append(_q(f'室内墙面{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                items.append(_q(f'室内墙面{name}({miss_txt}待核)', 'm²', 0,
+                                f'待提取: 部位[{miss_txt}]无房间几何证据', SRC_PENDING, 部位=pos))
+                continue
+            elif code.startswith('棚'):
+                q = round(area_sum * floors, 2)
+                note += f'; 面积=房间{area_sum}m²×{floors}层({n_rooms}间实测)'
+                items.append(_q(f'室内顶棚{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                items.append(_q(f'室内顶棚{name}({miss_txt}待核)', 'm²', 0,
+                                f'待提取: 部位[{miss_txt}]无房间几何证据', SRC_PENDING, 部位=pos))
+                continue
         if code.startswith('楼'):
             q = area_map['楼面_m2']
             note += f'; 面积=平面{plane_area}×{floors}层(待核,多做法需按房间分劈)'

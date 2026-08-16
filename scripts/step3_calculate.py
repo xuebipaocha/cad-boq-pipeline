@@ -399,6 +399,49 @@ def quality_report(drawing_data, results):
         if '默认' in (item.get('计算式','') + item.get('备注','')) or '估算' in (item.get('计算式','') + item.get('备注','')):
             warnings.append({'级别':'低','问题':f'{name} 使用估算逻辑','建议':'补齐图纸参数后重算'})
     score = max(0, 100 - sum({'高':20,'中':10,'低':4}.get(w['级别'],5) for w in warnings))
+    # v6.9.5 思维层①: 做法互斥总量检查 — 同部位多做法叠加 vs 物理上限
+    # (造价人看到"地面总面积=建筑面积×4"会立刻说错; 大修多做法全面积估算的
+    # 虚假膨胀直接暴露: 船体大楼抹灰系数 8.73 的根因)
+    try:
+        areas = drawing_data.get('面积区域', []) or []
+        bfa = max((float(a.get('面积_m2', 0) or 0) for a in areas), default=0)
+        perim = max((float(a.get('周长_m', 0) or 0) for a in areas), default=0)
+        tc = ' '.join(drawing_data.get('施工说明', []) or [])
+        import re as _re3
+        floors = 3 if _re3.search(r'一[至到~～]三|一二三|三层', tc) else 2
+        floor_h = 3.2
+        if bfa > 0:
+            groups = {
+                '楼地面': (bfa * floors, [i for i in results
+                           if any(k in i.get('分项名称', '') for k in ('楼地面', '地面'))
+                           and i.get('单位') == 'm²' and i.get('工程量', 0) > 0]),
+                '天棚': (bfa * floors, [i for i in results
+                        if any(k in i.get('分项名称', '') for k in ('顶棚', '天棚'))
+                        and i.get('单位') == 'm²' and i.get('工程量', 0) > 0]),
+            }
+            for gname, (cap, items) in groups.items():
+                total = sum(float(i.get('工程量', 0) or 0) for i in items)
+                if total > cap * 1.5:
+                    warnings.append({'级别': '高',
+                                     '问题': f'{gname}多做法叠加总量 {total:.0f}m² '
+                                             f'= 物理上限({cap:.0f}m² 面积×{floors}层)的 {total / cap:.1f} 倍, '
+                                             f'多做法互斥部位被全面积重复计入',
+                                     '建议': '按做法表部位分劈(实测房间部分), 无几何证据部位标待提取; '
+                                             f'涉及分项: {len(items)}项'})
+            if perim > 0:
+                wall_cap = perim * floor_h * floors
+                wall_items = [i for i in results
+                              if any(k in i.get('分项名称', '') for k in ('墙面',))
+                              and i.get('单位') == 'm²' and i.get('工程量', 0) > 0]
+                wall_total = sum(float(i.get('工程量', 0) or 0) for i in wall_items)
+                if wall_total > wall_cap * 2.0:
+                    warnings.append({'级别': '高',
+                                     '问题': f'墙面多做法叠加总量 {wall_total:.0f}m² = 周长{perim:.0f}×'
+                                             f'层高{floor_h}×{floors}层 的 {wall_total / wall_cap:.1f} 倍, '
+                                             f'墙面做法互斥部位被重复计入',
+                                     '建议': '按做法表部位分劈墙面, 无几何证据标待提取'})
+    except Exception:
+        pass
     out = {'质量分': score, '警告数量': len(warnings), '警告': warnings[:100]}
     # v6.8: 自检结果随质量报告输出(供编制说明/下游消费)
     out['ABC大项'] = drawing_data.get('ABC大项', [])

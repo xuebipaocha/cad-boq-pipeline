@@ -48,6 +48,9 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
         f"3. 工程性质: {pid.get('工程性质', '新建')}",
         f"4. 建筑面积: {bfa:.2f}m²（来源: {area_src or '未识别'}）" if bfa else "4. 建筑面积: 未识别",
     ]
+    ver = pid.get('图纸版本', {}) or {}
+    if ver.get('修订记录'):
+        overview.append(f"5. 图纸版本: 修订记录 {'、'.join(ver['修订记录'])}（以最新修订为准）")
     if perim:
         overview.append(f"5. 主区域周长: {perim:.2f}m")
     for k, v in prof.items():
@@ -130,11 +133,16 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
         abc_rows = ["（算量质量报告生成）"]
     sections['ABC大项(重点复核)'] = abc_rows
 
-    # 七、漏项检查(知识库工程类型常见项)
+    # 七、漏项检查(知识库工程类型常见项 + v6.9.5 自动对照结果)
     kc = pid.get('知识检查', {}) or {}
     checklist = kc.get('漏项检查', []) or []
     if checklist:
         sections['漏项检查(对照图纸核实)'] = checklist
+    miss = pid.get('漏项对照', []) or []
+    if miss:
+        sections['漏项自动对照(疑似漏项)'] = [
+            f"□ {mm} — 图纸{pid.get('工程性质', '')}类型常见项, 本次分项中未见对应, 请核实是否遗漏"
+            for mm in miss]
     return sections
 
 

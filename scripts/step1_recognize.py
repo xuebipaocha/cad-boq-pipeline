@@ -784,7 +784,9 @@ def run(dwg_file, output_dir):
         pid['待查证'] = collect_unverified()
         if kc.get('图纸疑问建议'):
             for q in kc['图纸疑问建议']:
-                pid.setdefault('图纸问题候选', []).append(f'[知识库查证] {q[:100]}')
+                # v6.9.5 思维层③: 疑问自动带暂定口径建议(图纸会审形态: 问题+暂按+需确认)
+                pid.setdefault('图纸问题候选', []).append(
+                    f'[知识库查证] {q[:90]}；暂按行业通行口径计列, 需设计/造价站确认')
             print(f"  知识库: 工艺链命中{len(kc.get('工艺链命中', {}))}类 "
                   f"规则依据{len(kc.get('规则依据', {}))}条 漏项检查{len(kc.get('漏项检查', []))}组 "
                   f"待查证{len(pid['待查证'])}条")
