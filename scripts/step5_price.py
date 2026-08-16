@@ -83,6 +83,20 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
     """
     name = item.get('source_name') or item.get('name') or ''
     mapped = item.get('mapped_quotas') or []
+    # v6.9.2: 门窗泛化项(更换/拆除/洞口面积)不走组合规则 — 组合规则'拆除门窗'的子目
+    # 检索会漂移到高价装饰定额(17-229 门窗框装饰线条 5630元/m² 实测), 统一走自补
+    if '门窗' in name and any(k in name for k in ('更换', '拆除', '洞口面积')):
+        rule = None
+        _SUPPLEMENT_SEQ[0] += 1
+        _sq = {
+            'quota_code': f'{_SUPPLEMENT_SEQ[0]:03d}',
+            'item_name': f'{name}（自补定额）',
+            'unit': item.get('unit') or '',
+            'base_price': 0, 'labor_cost': 0, 'material_cost': 0, 'machine_cost': 0,
+            '_score': 0, '_confidence': '待确认', '_match_method': 'supplement',
+            '_supplement': True,
+        }
+        return [{'quota': _sq, 'content': 1.0, 'note': '自补定额，人材机待补充（门窗泛化项防错配）'}]
     rule = _find_combo_rule(name, combos)
     if rule:
         subs = []
@@ -158,6 +172,28 @@ def _pick_quotas(item, specialty, db, combos, features_text=''):
             return subs
     # 回退: 单定额(原逻辑)
     q = None
+    # v6.9.2: 拆除类换安装定额 — 真实工程'换'惯例(拆除=安装×人材机系数 0.5/0/0),
+    # 直接检索拆除定额常无结果, 按规则换对应安装定额(显示'换'标记)
+    if '拆除' in name and not mapped:
+        try:
+            from pipeline.db import get_liaoning_conn
+            _conn = get_liaoning_conn()
+            _base_kw = name.replace('拆除', '安装')
+            _rows = _conn.execute(
+                "SELECT * FROM quota_items WHERE item_name LIKE ? AND base_price>0 LIMIT 10",
+                (f'%{_base_kw}%',)).fetchall()
+            _conn.close()
+            if _rows:
+                _c = dict(sorted(_rows, key=lambda x: (len(x['item_name'] or ''), -(x['base_price'] or 0)))[0])
+                _c['unit'] = db.infer_unit(_c.get('item_name'), _c.get('unit'))
+                _c['_score'] = 0.6
+                _c['_confidence'] = '中'
+                _c['_match_method'] = 'exchange'
+                _c['_exchange'] = {'基准': _base_kw, '系数': {'人工': 0.5, '材料': 0.0, '机械': 0.0},
+                                   '说明': '拆除=安装×人工0.5材料0机械0(行业惯例, ⚠️待核辽宁定额)'}
+                q = _c
+        except Exception:
+            q = None
     # v6.9.1: 泛化项(门窗更换/拆除/洞口面积)强制自补 — 模糊匹配实测错配到
     # 高价装饰定额('门窗框小型构件装饰线条增加费' 5630元/m²), 自补最诚实
     if '门窗' in name and any(k in name for k in ('更换', '拆除', '洞口面积')):
@@ -435,6 +471,14 @@ def run(boq_json, output_dir):
             except Exception:
                 pass
 
+            # v6.9.2: 换定额系数应用(拆除=安装×人工0.5材料0机械0)
+            _ex = (q or {}).get('_exchange')
+            if _ex and _ex.get('系数'):
+                _k = _ex['系数']
+                lab = lab * float(_k.get('人工', 1.0) or 1.0)
+                mat = mat * float(_k.get('材料', 1.0) or 1.0)
+                mach = mach * float(_k.get('机械', 1.0) or 1.0)
+
             mgmt_base = (lab + mach) * _base_factor(mgmt_info, db)
             profit_base = (lab + mach) * _base_factor(profit_info, db)
             mgmt = mgmt_base * _rate(mgmt_info)
@@ -461,6 +505,7 @@ def run(boq_json, output_dir):
                 'note': sub.get('note', ''),
                 'borrowed': bool(q.get('_borrowed')),
                 'supplement': bool(q.get('_supplement')),
+                'exchange': bool(q.get('_exchange')),
             })
 
         lab, mat, mach = agg['lab'], agg['mat'], agg['mach']
@@ -499,6 +544,7 @@ def run(boq_json, output_dir):
         # v5.17: 借用/自补标记
         if any(s.get('borrowed') for s in sub_rows): notes.append('含跨册借用定额')
         if any(s.get('supplement') for s in sub_rows): notes.append('含自补定额')
+        if any(s.get('exchange') for s in sub_rows): notes.append('换定额(拆除=安装×0.5/0/0, ⚠️行业惯例待核)')
         # v5.19: 主材标记
         if main_mat:
             src_txt = {'dalian': '大连信息价', 'real_boq': '真实询价', 'experience': '经验价'}.get(mp['main_source'], mp['main_source'])
