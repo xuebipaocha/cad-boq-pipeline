@@ -317,6 +317,30 @@ def calc(data):
     con_vol_total += slab_vol
     r.append({'分项名称':'现浇混凝土板','单位':'m³','工程量':slab_vol,'计算式':calc_note,'定额编号':'','备注':hole_note})
 
+    # v6.9.7 ⑥: 模板接触面积(造价人: 混凝土量→模板量→措施费, 三表联动)
+    # 柱=周长×高×n, 梁=2×(宽+高)×长×n, 板=板面积×层数, 墙=2×墙面积; 无构件证据不估算
+    tmpl = []
+    try:
+        if cm_n and col_w and col_h:
+            tmpl.append(('柱模板', round(2 * (col_w + col_h) / 1000 * floor_h * cm_n, 2),
+                         f'{cm_n}根×周长{2*(col_w+col_h)/1000:.2f}m×层高{floor_h}m'))
+        if cm_bn and beam_w and beam_h:
+            tmpl.append(('梁模板', round(2 * (beam_w + beam_h) / 1000 * beam_len * cm_bn, 2),
+                         f'{cm_bn}根×2×(宽{beam_w}+高{beam_h})×长{beam_len}m'))
+        if total > 0 and floors:
+            tmpl.append(('板模板', round(total * floors, 2), f'板面积{total:.0f}m²×{floors}层(底模)'))
+        if cm_walls:
+            wall_vol = sum(float(w.get('体积_m3', 0) or 0) for w in cm_walls)
+            wall_th = (cm_walls[0].get('厚度_mm') or wall_thick_mm or 200) / 1000
+            if wall_vol > 0 and wall_th > 0:
+                tmpl.append(('墙模板', round(2 * wall_vol / wall_th, 2),
+                             f'2×墙体积{wall_vol:.1f}m³÷墙厚{wall_th*1000:.0f}mm'))
+    except Exception:
+        tmpl = []
+    for tname, tq, tnote in tmpl:
+        r.append({'分项名称': tname, '单位': 'm²', '工程量': tq,
+                  '计算式': f'{tnote}(模板接触面积)', '定额编号': '', '备注': 'CAD实测'})
+
     # ── 钢筋 ──
     rebar_weight, rebar_note = _parse_rebar(texts, bfa, con_vol_total, col_h=floor_h, beam_len=beam_len)
     r.append({'分项名称':'钢筋','单位':'t','工程量':rebar_weight,'计算式':rebar_note,'定额编号':'','备注':'平法标注/配筋率'})

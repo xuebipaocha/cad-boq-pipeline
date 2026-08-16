@@ -455,7 +455,9 @@ def run(calc_json, output_dir):
         name = item.get('分项名称', '')
         qty = item.get('工程量', 0) or 0
         # v6.3 C1: 施工范围外分项不进清单(标记范围外)
-        if item.get('范围外'):
+        # v6.9.7: 措施类分项(脚手架/模板/垂直运输)例外 — 措施项目不依赖设计内容
+        # 覆盖(大修外墙施工必搭脚手架, 设计内容不会写'脚手架'), 范围掩码误杀已修复
+        if item.get('范围外') and not any(k in name for k in ('脚手架', '模板', '垂直运输', '超高')):
             skipped += 1
             continue
         # v5.6: 数据来源卡口 — 待提取分项不进清单, 进待提取清单
