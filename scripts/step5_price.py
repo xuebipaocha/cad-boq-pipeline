@@ -77,15 +77,85 @@ def _match_conditions(sub, features_text):
     return any(c in features_text for c in conds)
 
 
+# v6.9.3: 材质词表 — 组价按材质匹配定额(统一逻辑: 清单特征材质 → 定额材料/工作内容)
+# 用户确认: 所有项目一个逻辑, 不要项目级特判
+MATERIAL_KWS = ['钢质', '塑钢', '木质', '铝合金', '断桥铝', '防火', '推拉', '平开',
+                '铸铁', 'PPR', 'UPVC', '镀锌钢管', '无缝钢管', '衬塑', '不锈钢',
+                '乳胶漆', '真石漆', '氟碳漆', '瓷砖', '石材', '木地板', '卷材', '聚氨酯',
+                '加气块', '实心砖', '多孔砖', '陶粒混凝土']
+
+
+def _extract_material_kw(name, features_text=''):
+    """从清单名+特征提取材质词(第一个命中)。"""
+    hay = f'{name} {features_text or ""}'
+    for w in MATERIAL_KWS:
+        if w in hay:
+            return w
+    return None
+
+
+def _find_quota_by_material(kw, specialty, db, name):
+    """材质词+类型词硬约束检索定额(名称含材质词; 门/窗类结合类型词)。
+    统一逻辑: 清单特征材质 → 定额材料/工作内容(用户确认, 土建+安装通用)。"""
+    try:
+        from pipeline.db import get_liaoning_conn
+        # v6.9.3: 类型词结合 — '塑钢窗更换' 应匹配 8-71 塑钢成品窗而非 8-10 塑钢门
+        type_kw = ''
+        if '窗' in name and '门' not in name:
+            type_kw = '窗'
+        elif '门' in name and '窗' not in name:
+            type_kw = '门'
+        conn = get_liaoning_conn()
+        try:
+            cat = db.SPECIALTY_CATEGORY.get(specialty, [specialty])
+            cat_cond = ' OR '.join(['category LIKE ? OR sub_category LIKE ?' for _ in cat])
+            params = []
+            for c in cat:
+                params.extend([f'%{c}%', f'%{c}%'])
+            if type_kw:
+                rows = conn.execute(
+                    f"SELECT * FROM quota_items WHERE item_name LIKE ? AND item_name LIKE ? "
+                    f"AND ({cat_cond}) AND base_price>0 LIMIT 15",
+                    (f'%{kw}%', f'%{type_kw}%') + tuple(params)).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT * FROM quota_items WHERE item_name LIKE ? AND ({cat_cond}) AND base_price>0 LIMIT 15",
+                    (f'%{kw}%',) + tuple(params)).fetchall()
+            conn.close()
+        except Exception:
+            conn.close()
+            rows = []
+        if rows:
+            cands = sorted(rows, key=lambda x: (len(x['item_name'] or ''), -(x['base_price'] or 0)))
+            q = dict(cands[0])
+            q['unit'] = db.infer_unit(q.get('item_name'), q.get('unit'))
+            q['_score'] = 0.8
+            q['_confidence'] = '高'
+            q['_match_method'] = f'material:{kw}{type_kw}'
+            return q
+    except Exception:
+        pass
+    return None
+
+
 def _pick_quotas(item, specialty, db, combos, features_text=''):
     """多定额组合: 返回 [{quota, content, note}...]。无规则时回退单定额。
     features_text: 清单特征/做法表/施工说明合并文本, 用于子目条件判定。
     """
     name = item.get('source_name') or item.get('name') or ''
     mapped = item.get('mapped_quotas') or []
-    # v6.9.2: 门窗泛化项(更换/拆除/洞口面积)不走组合规则 — 组合规则'拆除门窗'的子目
-    # 检索会漂移到高价装饰定额(17-229 门窗框装饰线条 5630元/m² 实测), 统一走自补
-    if '门窗' in name and any(k in name for k in ('更换', '拆除', '洞口面积')):
+    # v6.9.3: 材质匹配优先(统一逻辑) — 只从【分项自身】名称+特征提取材质词
+    # (item['features'] 是该分项特征, features_text 是全图文本 — 全图提取会让
+    # 任意项错配到图内其他材质定额, 如'门窗更换(汇总)'错配钢质防盗门8-14)
+    _mkw = _extract_material_kw(name, item.get('features') or '')
+    mq = _find_quota_by_material(_mkw or '', specialty, db, name) if _mkw else None
+    if mq:
+        return [{'quota': mq, 'content': 1.0, 'note': f'材质匹配定额({mq.get("_match_method", "")})'}]
+    # v6.9.2/3: 门窗泛化项(更换/拆除/洞口面积, 含'未注明材质'类)不走组合规则 —
+    # 组合规则'拆除门窗'/'拆除通用'子目检索会漂移到高价装饰定额(17-229 门窗框装饰
+    # 线条 5630元/m²、16-2 实心墙 3806元/m² 实测); 无材质词命中的门窗项统一自补
+    if ('门窗' in name or ('门' in name or '窗' in name)) \
+            and any(k in name for k in ('更换', '拆除', '洞口面积')):
         rule = None
         _SUPPLEMENT_SEQ[0] += 1
         _sq = {
@@ -314,6 +384,24 @@ def _match_main_material(item, features_text, db):
                     return rows[0]
             except Exception:
                 continue
+
+    # ③ v6.9.3: 材质词模糊匹配 — '塑钢、推拉窗更换' 含'塑钢'但子串不连续,
+    # 按材质词 LIKE 匹配 material_prices('塑钢推拉窗' 239元/m²); 类型词(门/窗)优先
+    _MATERIAL_WORDS = ['塑钢', '钢质', '木质', '铝合金', '断桥铝', '铸铁', '不锈钢']
+    _hit_word = next((w for w in _MATERIAL_WORDS if w in combined), None)
+    if _hit_word:
+        _type = '窗' if ('窗' in combined and '门' not in combined) else ('门' if '门' in combined else '')
+        _cands = [m for m in _load_material_names(db) if _hit_word in m]
+        if _type:
+            _cands = [m for m in _cands if _type in m] or _cands
+        if _cands:
+            _cands.sort(key=len)
+            try:
+                rows = db.find_material_price(_cands[0], top_n=1)
+                if rows:
+                    return rows[0]
+            except Exception:
+                pass
     return None
 
 

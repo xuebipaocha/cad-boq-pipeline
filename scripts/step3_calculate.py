@@ -147,7 +147,12 @@ def _apply_scope_mask(drawing_data, results):
                         break
                 # 2) 大修有设计内容但分项不在范围内 → 范围外(待确认)
                 if not out_reason and scope_parts:
-                    if not any(p in nm for p in scope_parts if p):
+                    # v6.9.3: '门窗'对象覆盖所有门/窗分项(钢质门更换/塑钢窗更换…
+                    # 材质拆项后名称含'门'或'窗'但不再含'门窗'连续词)
+                    in_scope = any(p in nm for p in scope_parts if p)
+                    if not in_scope and '门窗' in scope_parts and any(k in nm for k in ('门', '窗')):
+                        in_scope = True
+                    if not in_scope:
                         out_reason = '设计内容未覆盖该分项'
                 if out_reason:
                     it['范围外'] = True
