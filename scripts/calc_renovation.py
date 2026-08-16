@@ -382,6 +382,30 @@ def calc(data):
             r.append(_q('外墙仿石涂料' if '仿石' in tc else '外墙涂料', 'm²', 0,
                         '待提取: 无外墙面积证据', SRC_PENDING))
 
+    # ── v6.8: 防水上翻口径(GB55030-2022 §4.6.4 强制条文触发) ──
+    # 图纸注明上翻高度 → 独立列'防水层上翻'(周长×高度); 未注明 → 图纸疑问(不编造)
+    if '防水' in tc:
+        # v6.8: 上翻高度双单位识别 — 图纸常写 '≥300mm' 或 '0.3m'
+        # (船体大楼原文: '余部位除特殊注明外均上翻…防水层(两遍成活) 0.3m')
+        mm_m = (re.search(r'上翻[^\d]{0,20}[≥>]?(\d{2,4})\s*(?:mm|毫米)', tc)
+                or re.search(r'翻起[^\d]{0,20}[≥>]?(\d{2,4})\s*(?:mm|毫米)', tc))
+        m_m = re.search(r'上翻[^\d]{0,40}?(\d+\.?\d*)\s*m(?!m)', tc)
+        if mm_m:
+            up_val = float(mm_m.group(1)) / 1000
+        elif m_m and 0.05 <= float(m_m.group(1)) <= 3.0:
+            up_val = float(m_m.group(1))
+        else:
+            up_val = None
+
+        perim_fd = max((float(a.get('周长_m', 0) or 0) for a in (data.get('面积区域') or [])), default=0)
+        if up_val is not None and perim_fd > 0:
+            r.append(_q('防水层上翻', 'm²', round(perim_fd * up_val, 2),
+                        f'周长{perim_fd:.1f}×上翻{up_val}m(图纸标注, GB55030-2022 §4.6.4)', SRC_TEXT))
+        else:
+            r.append(_q('防水层上翻', 'm²', 0,
+                        '待提取: 图纸未注明防水上翻高度, GB55030-2022 §4.6.4 强制要求'
+                        '用水房间翻起≥250mm/盥洗处≥1200mm/淋浴区≥2000mm', SRC_PENDING))
+
     # ── 3. 雨水管更换(精确参数优先) ──
     if '雨水管' in tc or '落水管' in tc:
         if qty.get('雨水斗_个'):

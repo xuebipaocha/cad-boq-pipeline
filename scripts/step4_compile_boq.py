@@ -658,6 +658,14 @@ def run(calc_json, output_dir):
     # 造价工程师交付成果的必要部分, 此前完全缺失
     try:
         from compilation_note import build_note, export_note_xlsx
+        # v6.8: 注入算量自检结果(ABC大项/造价指标) — step4 读算量质量报告补全编制说明
+        try:
+            with open(os.path.join(output_dir, '算量质量报告.json'), encoding='utf-8') as f:
+                qrep = json.load(f)
+            recog_data['ABC大项'] = qrep.get('ABC大项', [])
+            recog_data['造价指标'] = qrep.get('造价指标', {})
+        except Exception:
+            pass
         note = build_note(recog_data, [], boq_items, pending_items, estimated_items,
                           problems=json.load(open(os.path.join(output_dir, '审图记录.json'), encoding='utf-8')).get('problems') if os.path.exists(os.path.join(output_dir, '审图记录.json')) else None,
                           project_name=project_name)
