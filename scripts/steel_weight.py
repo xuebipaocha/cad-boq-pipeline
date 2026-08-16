@@ -75,7 +75,9 @@ def parse_steel_spec(text):
         (r'Φ\d+[\s×Xx*]\d+', 'O'),
         (r'□\d+[\s×Xx*]\d+[\s×Xx*]\d+', '□'),
         (r'●\d+', '●'),
-        (r'[—\-]\d+', '—'),
+        # v6.6: 扁钢 '-130x14' 必须 '负号+数字+×+数字' — 原 '[—\-]\d+' 只吃负号+数字,
+        # 规范编号 'GB 50009-2012' 的 '-2012' 被当成扁钢构件(设计说明整段变钢构件)
+        (r'[—\-]\d+[\s×Xx*]\d+', '—'),
         (r'[Ll]\d+[\s×Xx*]\d+', 'L'),
         (r'[Cc]\d+[\s×Xx*]\d+[\s×Xx*]\d+[\s×Xx*]\d+', 'C'),
     ]
@@ -84,6 +86,11 @@ def parse_steel_spec(text):
         if m:
             spec = m.group()
             nums = [int(s) for s in re.findall(r'\d+', spec)]
+            # v6.6: 参数合理性校验 — 角钢 L50x52(52>50/2)/扁钢 -100x82(82>100/2)
+            # 是聚类拼接污染, 解析出负重量; 厚度>边宽一半无物理意义 → 跳过
+            if stype in ('L', '—') and len(nums) >= 2:
+                if nums[1] > nums[0] / 2:
+                    continue
             if stype == 'H' and len(nums) >= 4:
                 if 'W' in spec: return ('H', nums[:4])  # HW宽翼缘
                 if 'M' in spec: return ('H', nums[:4])  # HM中翼缘
@@ -98,9 +105,17 @@ def parse_steel_spec(text):
     return None
 
 def extract_steel_from_texts(texts):
-    """从施工说明/CAD文字中提取钢构件清单"""
+    """从施工说明/CAD文字中提取钢构件清单
+    v6.6: 过滤设计说明噪声 — 规范引用/设计参数/图签行不是钢构件
+    (真实图纸实测: '《建筑结构荷载规范》GB 50009-2012'/'耐火等级二级…' 被当构件)
+    """
     members = []
     for t in texts:
+        # v6.6: 规范引用/设计说明/图签行直接跳过
+        if not t or len(t) > 40:
+            continue
+        if re.search(r'GB\s?\d|JGJ|JG/T|GB/T|规范|规程|标准|图集|耐火等级|抗震等级|抗震设防|特征周期|基础型式|DRAWING|图\s*号', t):
+            continue
         spec = parse_steel_spec(t)
         if spec:
             stype, params = spec
@@ -111,7 +126,10 @@ def extract_steel_from_texts(texts):
                 if m: length = float(m.group(1)); break
             wt_info = calc_weight_main(stype, params)
             if wt_info:
-                members.append({'名称':t[:20],'截面类型':stype,'截面参数':params,'长度_m':length})
+                # v6.6: 名称截断 20 字符(与 v6.5 一致) — 恰好截掉 '钢柱/钢梁/檩条'
+                # 后缀, 分项名 'H400×200×8×13 L=9m 钢制作安装' 与人工清单一致;
+                # 输入改为原始 TEXT 后无需拼接编号(聚类串才有编号+规格粘连)
+                members.append({'名称': t[:20], '截面类型': stype, '截面参数': params, '长度_m': length})
     return members
 
 # 从CAD标注中提取钢构件规格（替代方法）
