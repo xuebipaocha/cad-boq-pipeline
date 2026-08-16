@@ -50,7 +50,9 @@ def find_sections(msp):
             continue
 
     # 找剖面标记文字
-    marks = [t for t in texts if _has_section_mark(t['text'])]
+    marks = [t for t in texts if _has_section_mark(t['text']) and len(t['text']) <= 25]
+    # v6.6: 长度>25 的标记是设计说明中的"引用性提及"(如'…详见1-1剖面图…'),
+    # 不是剖面图标记本身 — 否则整段设计说明被当剖面区域(钢结构厂房实测)
     if not marks:
         return []
 
@@ -92,6 +94,11 @@ def profile_area(msp, section):
             # 这类垃圾体积(真实图纸实测, 0 层是图框专用层不承载实体)
             layer = e.dxf.layer or ''
             if layer == '0' or '图框' in layer or 'TITLE' in layer.upper():
+                continue
+            # v6.6: 排除模板/洞口/标注类图层 — 钢结构厂房实测 1-1 剖面取到
+            # S-MB-DK(模板洞口)层 125.98m² 轮廓 → 335.11m³ 假断面工程;
+            # MB(模板)/DK(洞口)/DIM/标注 层不是结构断面
+            if re.search(r'MB|DK|DIM|标注|洞口|模板|TEXT', layer, re.I):
                 continue
             pts = list(e.get_points('xy'))
             if len(pts) < 3:

@@ -143,24 +143,24 @@ def _parse_decoration(texts, bfa, total_area):
     results = []
     ground_coef = _first_float(tc, [r'地面系数\s*(\d+\.?\d*)'], 0.3, 1.0, 0.85)
     if '地砖' in tc:
-        results.append({'分项名称':'地砖地面','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}','定额编号':'','备注':'施工说明识别'})
+        results.append({'分项名称':'地砖地面','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}(系数估算)','定额编号':'','备注':'施工说明识别'})
     elif '地板' in tc:
-        results.append({'分项名称':'木地板地面','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}','定额编号':'','备注':'施工说明识别'})
+        results.append({'分项名称':'木地板地面','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}(系数估算)','定额编号':'','备注':'施工说明识别'})
     else:
-        results.append({'分项名称':'地面装饰','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}','定额编号':'','备注':'施工说明'})
+        results.append({'分项名称':'地面装饰','单位':'m²','工程量':round(total_area*ground_coef,2),'计算式':f'{total_area}×{ground_coef}(系数估算)','定额编号':'','备注':'施工说明'})
 
     wall_coef = _first_float(tc, [r'墙面系数\s*(\d+\.?\d*)'], 0.5, 6.0, 2.8)
     if '乳胶漆' in tc or '涂料' in tc:
-        results.append({'分项名称':'内墙乳胶漆','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}','定额编号':'','备注':'施工说明识别'})
+        results.append({'分项名称':'内墙乳胶漆','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}(系数估算)','定额编号':'','备注':'施工说明识别'})
     elif '墙砖' in tc:
-        results.append({'分项名称':'墙面砖','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}','定额编号':'','备注':'施工说明识别'})
+        results.append({'分项名称':'墙面砖','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}(系数估算)','定额编号':'','备注':'施工说明识别'})
     else:
-        results.append({'分项名称':'内墙面装饰','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}','定额编号':'','备注':'施工说明'})
+        results.append({'分项名称':'内墙面装饰','单位':'m²','工程量':round(total_area*wall_coef,2),'计算式':f'{total_area}×{wall_coef}(系数估算)','定额编号':'','备注':'施工说明'})
 
     if dec['天棚']:
-        results.append({'分项名称':'天棚装饰','单位':'m²','工程量':round(total_area,2),'计算式':str(total_area),'定额编号':'','备注':'施工说明识别'})
+        results.append({'分项名称':'天棚装饰','单位':'m²','工程量':round(total_area,2),'计算式':str(total_area)+'(估算)','定额编号':'','备注':'施工说明识别'})
     else:
-        results.append({'分项名称':'天棚装饰','单位':'m²','工程量':round(total_area,2),'计算式':str(total_area),'定额编号':'','备注':'施工说明'})
+        results.append({'分项名称':'天棚装饰','单位':'m²','工程量':round(total_area,2),'计算式':str(total_area)+'(估算)','定额编号':'','备注':'施工说明'})
 
     return results
 

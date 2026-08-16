@@ -237,6 +237,24 @@ def build_features_map(cm):
     return feat
 
 
+# v6.6: 钢结构清单科目映射(库内真实科目) — 带规格构件名匹配不到国标科目,
+# 按构件类型词定位科目(GB50854 金属结构列项思路), 规格进项目特征
+STEEL_SUBJECT_MAP = [
+    ('屋架', '010602001', '钢屋架'),
+    ('托架', '010602002', '钢托架'),
+    ('桁架', '010602003', '钢桁架'),
+    ('檩条', '010607001', '钢支撑、钢拉条、钢檩条'),
+    ('支撑', '010607001', '钢支撑、钢拉条、钢檩条'),
+    ('拉条', '010607001', '钢支撑、钢拉条、钢檩条'),
+    ('钢梯', '010607007', '钢梯、钢护栏、钢漏斗、钢板天沟'),
+    ('天沟', '010607007', '钢梯、钢护栏、钢漏斗、钢板天沟'),
+    ('柱', '010608001', '钢构件制作'),
+    ('梁', '010608001', '钢构件制作'),
+    ('钢构件', '010608001', '钢构件制作'),
+]
+STEEL_FIREPROOF_CODE = ('011404006', '金属构件喷刷防火涂料')  # 防火涂料分项(库内真实科目)
+
+
 def _append_estimated_block(xlsx_path, estimated_items):
     """v6.6: 计价表尾部追加"待核实"区块 — 估算分项(量未核实)独立展示,
     不进正式清单量。"""
@@ -459,6 +477,28 @@ def run(calc_json, output_dir):
         lst = find_list_item(name, category=cat, top_n=5)
         best = lst[0] if lst else {}
         score = best.get('_score', 0) or 0
+        # v6.6: 钢结构科目映射 — 带规格构件名('H400×200×8×13 L=9m 钢制作安装')
+        # 匹配不到国标科目且易错配(实测匹配率41%, '钢柱'匹配到屋面防水), 按构件
+        # 类型词映射到库内真实科目, 规格进项目特征(与真人列项思路一致)
+        if specialty == '钢结构工程' and '防火' not in name and '防腐' not in name:
+            for kw, m_code, m_name in STEEL_SUBJECT_MAP:
+                if kw in name:
+                    best = {'item_code': m_code, 'item_name': m_name, 'unit': 't'}
+                    score = 0.9
+                    break
+            else:
+                # v6.6: 纯规格构件名('H400×200×8×13 钢制作安装' 无类型词)
+                # → 通用钢构件制作科目兜底
+                if '钢' in name:
+                    best = {'item_code': '010608001', 'item_name': '钢构件制作', 'unit': 't'}
+                    score = 0.85
+        # v6.6: 钢结构防火涂料/防腐 — 防火涂料映射 011404006(库内真实科目);
+        # 防腐库内无对应科目(011002/011003是建筑防腐面层, 错配比自补更糟) → 自补
+        if specialty == '钢结构工程' and '防火' in name:
+            best = {'item_code': STEEL_FIREPROOF_CODE[0], 'item_name': STEEL_FIREPROOF_CODE[1], 'unit': 'm²'}
+            score = 0.9
+        elif specialty == '钢结构工程' and '防腐' in name:
+            best, score = {}, 0.0
         # v6.4: 房建专业拆除分项无合适国标项(拆除类多为市政/爆破), 强制自补防错配(如'楼梯墙拆除'→'楼梯')
         # v6.6: 大修泛化分项(门窗更换/雨水管更换/洞口面积)同样无对应国标科目 —
         # '门窗更换'错配'门窗框槛'(仿古, 单位樘vs个)比自补更糟, 强制自补更诚实
@@ -498,10 +538,11 @@ def run(calc_json, output_dir):
         # (特征描述必须根据图纸完善, 供套定额判定)
         feat_spec = feat_map.get(name, '')
         feat_layers = _match_features_for_item(name, recog_data)
-        if feat_spec and feat_layers:
-            features = f'{feat_spec}；{feat_layers}'
-        else:
-            features = feat_spec or feat_layers or name
+        # v6.7: 特征条目式格式(真实工程计价表规律: 1.名称 2.规格型号 3.其他)
+        feat_detail = '；'.join([p for p in (feat_spec, feat_layers) if p]) or '详见图纸'
+        features = (f'1.名称:{list_name or name}\n'
+                    f'2.规格型号:{feat_detail}\n'
+                    f'3.其他:满足图纸设计及规范要求')
 
         # v6.4: 工程名称(图纸施工说明提取, 覆盖模板示例文本)
         if not project_name:
@@ -612,6 +653,19 @@ def run(calc_json, output_dir):
         with open(est_path, 'w', encoding='utf-8') as f:
             json.dump(estimated_items, f, ensure_ascii=False, indent=2)
         print(f'  待核实清单: {est_path}')
+
+    # v6.7: 编制说明自动生成(编制依据/概况/口径/遗留问题/主要指标) —
+    # 造价工程师交付成果的必要部分, 此前完全缺失
+    try:
+        from compilation_note import build_note, export_note_xlsx
+        note = build_note(recog_data, [], boq_items, pending_items, estimated_items,
+                          problems=json.load(open(os.path.join(output_dir, '审图记录.json'), encoding='utf-8')).get('problems') if os.path.exists(os.path.join(output_dir, '审图记录.json')) else None,
+                          project_name=project_name)
+        note_path = os.path.join(output_dir, '编制说明.xlsx')
+        export_note_xlsx(note, note_path)
+        print(f'  编制说明: {note_path}')
+    except Exception as e:
+        print(f'  ⚠ 编制说明生成失败(跳过): {e}')
     with open(os.path.join(output_dir, '清单质量报告.json'), 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     return boq_items

@@ -87,7 +87,7 @@ def calc_decoration_from_model(cm, total_area, perim=None):
         for mname in sorted(wall_mats):
             items.append({
                 '分项名称': mname, '单位': 'm²', '工程量': round(share, 2),
-                '计算式': f'{total_area}×2.8÷{n}({mname}占比)', '定额编号': '',
+                '计算式': f'{total_area}×2.8÷{n}({mname}占比,系数估算)', '定额编号': '',
                 '备注': '构件模型-墙面',
             })
     elif walls:
@@ -239,7 +239,7 @@ def calc_decoration_detail(data, total_area, perim=None):
     elif '地面' in all_text:
         items.append({
             '分项名称': '地面装饰', '单位': 'm²', '工程量': round(total_area * 0.85, 2),
-            '计算式': f'{total_area}×0.85', '定额编号': '', '备注': '施工说明',
+            '计算式': f'{total_area}×0.85(系数估算)', '定额编号': '', '备注': '施工说明',
         })
 
     # 2. 墙面: 按材料细分
@@ -262,14 +262,14 @@ def calc_decoration_detail(data, total_area, perim=None):
                 '分项名称': mname,
                 '单位': 'm²',
                 '工程量': round(share, 2),
-                '计算式': f'{total_area}×2.8÷{n}({mname}占比)',
+                '计算式': f'{total_area}×2.8÷{n}({mname}占比,系数估算)',
                 '定额编号': '',
                 '备注': '做法表细分',
             })
     elif '墙面' in all_text or '乳胶漆' in all_text:
         items.append({
             '分项名称': '内墙面装饰', '单位': 'm²', '工程量': round(total_area * 2.8, 2),
-            '计算式': f'{total_area}×2.8', '定额编号': '', '备注': '施工说明',
+            '计算式': f'{total_area}×2.8(系数估算)', '定额编号': '', '备注': '施工说明',
         })
 
     # 3. 天棚: 按做法细分
