@@ -165,7 +165,7 @@ def calculate(drawing_data):
     if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '大修与改造':
         try:
             from calc_renovation import calc as calc_renovation
-            return _apply_scope_mask(drawing_data, calc_renovation(drawing_data))
+            return _attach_basis(drawing_data, _apply_scope_mask(drawing_data, calc_renovation(drawing_data)))
         except Exception as e:
             print(f'  大修计算器跳过: {e}')
             # 回退到常规路径
@@ -266,7 +266,35 @@ def calculate(drawing_data):
                 all_results.append(_sq_item)
     except Exception as e:
         print(f'  剖面联动跳过: {e}')
-    return all_results
+    return _attach_basis(drawing_data, all_results)
+
+
+def _attach_basis(drawing_data, results):
+    """v6.8: 分项依据引用 — 每个分项带计算规则依据(从知识库查),
+    查不到标'待查证'(诚实: 有依据才写, 不编造依据)。
+    """
+    try:
+        from knowledge_query import query_rule
+        specialty = drawing_data.get('专业类型', '')
+        for it in results:
+            if it.get('依据'):
+                continue
+            name = it.get('分项名称', '')
+            # 用规则库关键词逐项匹配
+            basis = ''
+            for kw in ('防水', '混凝土', '门窗', '钢构件', '金属结构', '砌体',
+                       '管道', '电缆', '苗木', '道路', '断面', '拆除', '抹灰',
+                       '涂料', '楼地面', '地面', '墙面', '天棚', '吊顶', '地板', '地砖'):
+                if kw in name:
+                    r = query_rule(specialty, kw)
+                    if r and r.get('规则'):
+                        basis = f"{r.get('条款', '')}: {r['规则'][:60]}"
+                        break
+            it['依据'] = basis or '待查证'
+    except Exception:
+        for it in results:
+            it.setdefault('依据', '待查证')
+    return results
 
 
 def _infer_source(item):
@@ -321,6 +349,26 @@ def quality_report(drawing_data, results):
                              '建议': f"计算式: {op['计算式']}；经验区间: {op['经验区间']}（{op['来源']}）"})
     except Exception:
         pass
+    # v6.8: ABC 大项分析 — 按工程量排序列前10项+累计占比(审计反向思维:
+    # 审价人先盯大项, 大项错=总价废; 大项自动标注重点复核)
+    try:
+        ranked = sorted([i for i in results if (i.get('工程量', 0) or 0) > 0],
+                        key=lambda i: i.get('工程量', 0), reverse=True)
+        if ranked:
+            top = ranked[:10]
+            abc = [{'分项名称': i.get('分项名称', ''), '单位': i.get('单位', ''),
+                    '工程量': i.get('工程量', 0), '依据': i.get('依据', '')} for i in top]
+            drawing_data['ABC大项'] = abc
+            # 大项中"估算/待核"来源的 → 高风险警告(大项必须最严格)
+            for i in top:
+                src = i.get('数据来源', '')
+                if src in ('估算', '待提取') or '待核' in str(i.get('计算式', '')):
+                    warnings.append({'级别': '高', '问题':
+                                     f'大项[{i.get("分项名称", "")}] 量{i.get("工程量", 0)}'
+                                     f'{i.get("单位", "")} 来源{src or "待核"} — 大项必须实测/复核',
+                                     '建议': '补图纸证据或人工核实后再进清单'})
+    except Exception:
+        pass
     if area <= 0:
         warnings.append({'级别':'高','问题':'缺少有效面积区域','建议':'检查闭合多段线或面积文字标注'})
     if not any(isinstance(l.get('厚度_mm'), (int,float)) and l.get('厚度_mm') > 0 for l in drawing_data.get('构造层',[])):
@@ -340,7 +388,11 @@ def quality_report(drawing_data, results):
         if '默认' in (item.get('计算式','') + item.get('备注','')) or '估算' in (item.get('计算式','') + item.get('备注','')):
             warnings.append({'级别':'低','问题':f'{name} 使用估算逻辑','建议':'补齐图纸参数后重算'})
     score = max(0, 100 - sum({'高':20,'中':10,'低':4}.get(w['级别'],5) for w in warnings))
-    return {'质量分': score, '警告数量': len(warnings), '警告': warnings[:100]}
+    out = {'质量分': score, '警告数量': len(warnings), '警告': warnings[:100]}
+    # v6.8: 自检结果随质量报告输出(供编制说明/下游消费)
+    out['ABC大项'] = drawing_data.get('ABC大项', [])
+    out['造价指标'] = drawing_data.get('造价指标', {})
+    return out
 
 
 def export_excel(results, path, pending=None):
@@ -356,12 +408,12 @@ def export_excel(results, path, pending=None):
     bd = Border(left=Side(style='thin'),right=Side(style='thin'),top=Side(style='thin'),bottom=Side(style='thin'))
     ws.cell(row=1,column=1,value='工程量计算书').font = Font(name='微软雅黑', bold=True, size=16)
     ws.cell(row=1,column=1).alignment = Alignment(horizontal='center'); ws.merge_cells('A1:J1')
-    headers = ['序号','分项名称','单位','工程量','计算式','定额编号','规则来源','备注','计算来源','专业','部位']
+    headers = ['序号','分项名称','单位','工程量','计算式','定额编号','规则来源','备注','计算来源','专业','部位','依据']
     for i,h in enumerate(headers,1):
         c=ws.cell(row=3,column=i,value=h); c.font=hft; c.fill=hf; c.alignment=Alignment(horizontal='center'); c.border=bd
     r = 4
     for ri,item in enumerate(results):
-        vals=[ri+1,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业',''),item.get('部位','')]
+        vals=[ri+1,item.get('分项名称',''),item.get('单位',''),item.get('工程量',0),item.get('计算式',''),item.get('定额编号',''),item.get('规则来源',''),item.get('备注',''),item.get('_engine',''),item.get('专业',''),item.get('部位',''),item.get('依据','')]
         for ci,v in enumerate(vals,1):
             ws.cell(row=r,column=ci,value=v).font=df; ws.cell(row=r,column=ci).border=bd; ws.cell(row=r,column=ci).alignment=Alignment(horizontal='center', wrap_text=True)
         r += 1
@@ -377,7 +429,7 @@ def export_excel(results, path, pending=None):
                 c=ws.cell(row=r,column=ci,value=v); c.font=df; c.border=bd; c.fill=pf
                 c.alignment=Alignment(horizontal='center', wrap_text=True)
             r += 1
-    for c,w in [('A',6),('B',26),('C',8),('D',10),('E',32),('F',12),('G',18),('H',18),('I',10),('J',10),('K',20)]: ws.column_dimensions[c].width = w
+    for c,w in [('A',6),('B',26),('C',8),('D',10),('E',32),('F',12),('G',18),('H',18),('I',10),('J',10),('K',20),('L',40)]: ws.column_dimensions[c].width = w
     wb.save(path)
 
 

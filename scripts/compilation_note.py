@@ -98,6 +98,20 @@ def build_note(pid, calc_results, boq_items, pending_items, estimated_items,
         ind_rows = ["（算量质量报告生成，详见工程量计算书）"]
     sections['主要指标'] = ind_rows
 
+    # 六、ABC 大项(审计反向: 前10大分项重点复核)
+    abc = pid.get('ABC大项', []) or []
+    if abc:
+        abc_rows = [f"{i + 1}. {a.get('分项名称', '')} {a.get('工程量', '')}{a.get('单位', '')}"
+                    f"（依据: {a.get('依据', '')[:40]}）" for i, a in enumerate(abc)]
+    else:
+        abc_rows = ["（算量质量报告生成）"]
+    sections['ABC大项(重点复核)'] = abc_rows
+
+    # 七、漏项检查(知识库工程类型常见项)
+    kc = pid.get('知识检查', {}) or {}
+    checklist = kc.get('漏项检查', []) or []
+    if checklist:
+        sections['漏项检查(对照图纸核实)'] = checklist
     return sections
 
 

@@ -753,6 +753,20 @@ def run(dwg_file, output_dir):
     except Exception as e:
         print(f'  ⚠ OCR 兜底异常(跳过): {e}')
 
+    # ── v6.8: 知识库触发检查 — 线索词→工艺链/材料/规则/漏项(边做边查机制化) ──
+    # 命中结果写入 pid['知识检查']; ⚠️待核口径自动转图纸疑问(图纸问题清单可见)
+    try:
+        from knowledge_query import run_knowledge_checks
+        kc = run_knowledge_checks(pid)
+        pid['知识检查'] = kc
+        if kc.get('图纸疑问建议'):
+            for q in kc['图纸疑问建议']:
+                pid.setdefault('图纸问题候选', []).append(f'[知识库查证] {q[:100]}')
+            print(f"  知识库: 工艺链命中{len(kc.get('工艺链命中', {}))}类 "
+                  f"规则依据{len(kc.get('规则依据', {}))}条 漏项检查{len(kc.get('漏项检查', []))}组")
+    except Exception as e:
+        print(f'  ⚠ 知识库检查跳过: {e}')
+
     json_path = os.path.join(output_dir, '识图结果.json')
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(pid, f, ensure_ascii=False, indent=2)
