@@ -17,7 +17,8 @@ sys.stdout.reconfigure(encoding='utf-8')
 # 房间图层/标签关键词
 ROOM_KEYWORDS = ['客厅', '卧室', '卫生间', '厨房', '餐厅', '书房', '会议室', '办公室',
                  '阳台', '走廊', '过道', '门厅', '储藏', '衣帽间', '主卧', '次卧', '儿童房',
-                 '浴室', '洗手间', '休息室', '接待室', '机房', '库房', '卫生间', '淋浴间']
+                 '浴室', '洗手间', '休息室', '接待室', '机房', '库房', '卫生间', '淋浴间',
+                 '楼梯间', '楼梯']
 # 排除非房间层
 EXCLUDE_LAYERS = ['图框', '0', '墙体', '墙', '轴线', '标注', '尺寸', '门窗', '柱', '梁']
 
@@ -47,15 +48,24 @@ def _poly_perim(points):
 def detect_rooms(dxf_path, scale=1.0):
     """检测图纸闭合区域 → 房间候选列表。
 
-    返回 [{房间名, 面积_m2, 周长_m, 来源(图层/标签), 置信度}]。
+    返回 [{房间名, 面积_m2, 周长_m, 数量, 来源, 置信度}]。
     - 图层名含房间关键词 → 房间(高置信)
     - 闭合区域内文字含房间关键词 → 房间(中置信, 按面积匹配文字位置)
+    v6.6 增强(真实图纸驱动):
+    - 同名字房间聚合(办公室1..n → '办公室' 组: 面积=Σ, 周长=Σ, 数量=n)
+      — 做法分劈按部位词匹配房间组, 不需要逐个房间
+    - 0 层不再整体排除 — 天正图纸把房间轮廓画在 0 层(船体大楼实测),
+      仅排除 0 层的大图框(>300m²)与图框层
+    - 编号房间 '卫1'/'卫2' 标签模式支持(平面图有标注时)
     """
     import ezdxf
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
     rooms = []
     seen_names = {}
+
+    # v6.6: 房间标签模式 — 房间词 / 卫N / LC式编号不算房间(门窗号)
+    ROOM_TEXT_RE = re.compile(r'(' + '|'.join(ROOM_KEYWORDS) + r'|卫\s*\d+|卫生间\d*)')
 
     # 1. 闭合多段线按图层名识别
     for e in msp:
@@ -68,6 +78,9 @@ def detect_rooms(dxf_path, scale=1.0):
         if len(pts) < 4:
             continue
         area_m2 = _poly_area(pts) / 1e6 * (scale ** 2)
+        # v6.6: 0 层只收小轮廓(房间), 图框(>300m²)仍排除; 房间下限 1m²
+        if layer == '0' and area_m2 > 300:
+            continue
         if area_m2 < 1.0:  # 过滤过小(可能是符号)
             continue
         perim_m = _poly_perim(pts) / 1000 * scale
@@ -77,15 +90,19 @@ def detect_rooms(dxf_path, scale=1.0):
                 name = kw
                 break
         if name:
-            # 同层多个闭合取最大(最外层房间轮廓)
+            # v6.6: 同名字房间聚合(面积Σ/周长Σ/数量+1)
             if name in seen_names:
-                if area_m2 > seen_names[name]['面积_m2']:
-                    seen_names[name] = {'面积_m2': round(area_m2, 2), '周长_m': round(perim_m, 2)}
+                seen_names[name]['面积_m2'] = round(seen_names[name]['面积_m2'] + area_m2, 2)
+                seen_names[name]['周长_m'] = round(seen_names[name]['周长_m'] + perim_m, 2)
+                seen_names[name]['数量'] += 1
             else:
-                seen_names[name] = {'面积_m2': round(area_m2, 2), '周长_m': round(perim_m, 2)}
+                seen_names[name] = {'面积_m2': round(area_m2, 2), '周长_m': round(perim_m, 2), '数量': 1}
 
     # 2. 文字标签兜底: 闭合区域内文字含房间关键词(区域=闭合多段线 bbox)
     texts = [(e.dxf.text, (e.dxf.insert.x, e.dxf.insert.y)) for e in msp if e.dxftype() == 'TEXT']
+    # v6.6: 主轮廓(面积最大的闭合)是建筑外轮廓不是房间 — 标签兜底排除它,
+    # 否则嵌套轮廓(主轮廓⊃房间)会让同一标签被重复计入(办公室组 2259.83m²>主区域2021m²)
+    cand_polys = []
     for e in msp:
         if e.dxftype() != 'LWPOLYLINE' or not e.closed:
             continue
@@ -95,27 +112,52 @@ def detect_rooms(dxf_path, scale=1.0):
         pts = [(p[0], p[1]) for p in e.get_points()]
         if len(pts) < 4:
             continue
-        x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
-        y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
         area_m2 = _poly_area(pts) / 1e6 * (scale ** 2)
+        if layer == '0' and area_m2 > 300:
+            continue
         if area_m2 < 1.0:
             continue
-        # 区域内文字
-        inside = [t for t, (tx, ty) in texts if x0 <= tx <= x1 and y0 <= ty <= y1]
-        name = None
-        for t in inside:
-            for kw in ROOM_KEYWORDS:
-                if kw in t:
-                    name = kw
-                    break
-            if name:
-                break
-        if name and name not in seen_names:
+        cand_polys.append((area_m2, pts, layer))
+    if cand_polys:
+        main_area = max(a for a, _, _ in cand_polys)
+    else:
+        main_area = None
+    # 每个文字标签实例 → 最小包含轮廓(嵌套时取最内层房间)
+    tag_hits = {}  # (text,x,y) -> [name, area, perim]
+    for area_m2, pts, layer in cand_polys:
+        if main_area and area_m2 >= main_area * 0.95:
+            continue  # 主轮廓(建筑外轮廓)不是房间
+        x0, x1 = min(p[0] for p in pts), max(p[0] for p in pts)
+        y0, y1 = min(p[1] for p in pts), max(p[1] for p in pts)
+        inside = [(t, tx, ty) for t, (tx, ty) in texts if x0 <= tx <= x1 and y0 <= ty <= y1]
+        for t, tx, ty in inside:
+            # v6.6: 短标签(<12字)才算房间标注 — 做法表部位列('卫1、卫3、卫4'在
+            # 做法表区域)不是平面图房间标注, 长度+位置过滤防止跨区域误配
+            if len(t) > 12:
+                continue
+            m = ROOM_TEXT_RE.search(t)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            # v6.6: '卫生间排风扇2个' 这类含房间词的设施标注不是房间
+            if any(k in t for k in ('排风扇', '吊顶', '门口', '外地面')):
+                continue
             perim_m = _poly_perim(pts) / 1000 * scale
-            seen_names[name] = {'面积_m2': round(area_m2, 2), '周长_m': round(perim_m, 2)}
+            key = (t, tx, ty)
+            if key not in tag_hits or area_m2 < tag_hits[key][1]:
+                tag_hits[key] = [name, area_m2, perim_m]
+    for name, area_m2, perim_m in tag_hits.values():
+        # v6.6: 同名字房间聚合
+        if name in seen_names:
+            seen_names[name]['面积_m2'] = round(seen_names[name]['面积_m2'] + area_m2, 2)
+            seen_names[name]['周长_m'] = round(seen_names[name]['周长_m'] + perim_m, 2)
+            seen_names[name]['数量'] += 1
+        else:
+            seen_names[name] = {'面积_m2': round(area_m2, 2), '周长_m': round(perim_m, 2), '数量': 1}
 
     for name, info in seen_names.items():
         rooms.append({'房间名': name, '面积_m2': info['面积_m2'], '周长_m': info['周长_m'],
+                      '数量': info.get('数量', 1),
                       '来源': '图层' if any(k in name for k in ROOM_KEYWORDS) else '标签',
                       '置信度': 0.9})
     return rooms

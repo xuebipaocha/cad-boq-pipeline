@@ -107,6 +107,9 @@ SYNONYMS = {
     '喷刷涂料': ['墙面喷刷涂料'], '刷涂料': ['墙面喷刷涂料'], '墙面涂料': ['墙面喷刷涂料'],
     '吊顶': ['平面吊顶','跌级吊顶','天棚吊顶'], '石膏板': ['平面吊顶'], '铝扣板': ['铝扣板吊顶'],
     '踢脚': ['踢脚线','成品踢脚线'], '石材墙面': ['墙面砖','块料墙面'],
+    # v6.6: 部位同义词 — '外墙'→'墙面'(外墙防水错配屋面卷材防水的根因修复),
+    # '抹灰'→'一般抹灰'(外墙抹灰错配天棚抹灰)
+    '外墙': ['墙面'], '内墙': ['墙面'], '抹灰': ['一般抹灰'],
     # v6.4: 室内装饰材料同义(大修做法表分项 → 国标清单)
     '橡胶地面': ['塑胶地面', 'PVC'], 'PVC': ['塑胶地面', '塑料地面', '橡胶地面'],
     '木质地板': ['木地板', '实木复合地板'], '无机涂料': ['墙面喷刷涂料', '天棚喷刷涂料'],
@@ -375,7 +378,25 @@ def _candidate_score(query, row, category=None):
         if any(normalize_text(c) in text for c in cats):
             cat_bonus = 0.12
     score = min(0.99, recall * 0.52 + precision * 0.25 + exact + name_bonus + cat_bonus)
-    return round(score, 4)
+    # v6.6: 部位一致性 — '外墙防水'不得匹配'屋面卷材防水'(异部位×0.6),
+    # '外墙抹灰'不得匹配'天棚抹灰'; 同部位×1.1(真实图纸实测错配: 外墙防水→屋面卷材防水,
+    # 外墙抹灰→天棚抹灰, 外墙的量被算到屋面/天棚科目)
+    POS_GROUPS = [
+        ('墙面', ['外墙', '内墙', '墙面', '墙体']),
+        ('屋面', ['屋面', '屋顶']),
+        ('天棚', ['天棚', '吊顶', '顶棚']),
+        ('楼地面', ['楼地面', '地坪']),
+    ]
+    q_norm = normalize_text(query)
+    q_group = next((g for g, kws in POS_GROUPS if any(k in q_norm for k in kws)), None)
+    if q_group:
+        c_groups = {g for g, kws in POS_GROUPS if any(k in name for k in kws)}
+        if c_groups:
+            if q_group in c_groups:
+                score *= 1.1
+            else:
+                score *= 0.6
+    return round(min(0.99, score), 4)
 
 
 def _confidence(score, method='fuzzy'):

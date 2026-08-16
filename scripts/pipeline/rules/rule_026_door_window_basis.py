@@ -43,9 +43,31 @@ class DoorWindowBasisRule(RuleBase):
         area_total = round(sum(float(w.get('洞口面积_m2', 0) or 0) * int(w.get('数量', 1) or 1) for w in windows), 2)
         # CAD 实测洞口(交叉验证): 构件模型/墙洞
         measured = 0
-        for c in (drawing_data.get('构件模型') or []):
+        cm = drawing_data.get('构件模型') or {}
+        comps = []
+        # v6.6: 构件模型是 {类别: [构件...]} 的 dict, 原实现直接迭代 dict 得到
+        # str 键('柱'/'梁')后调 .get → 'str' object has no attribute 'get' 崩溃
+        if isinstance(cm, dict):
+            for lst in cm.values():
+                if isinstance(lst, list):
+                    comps.extend(lst)
+        elif isinstance(cm, list):
+            comps = cm
+        for c in comps:
+            if not isinstance(c, dict):
+                continue
             if c.get('类型') in ('门', '窗', '门窗', '洞口') or '门' in str(c.get('名称', '')) or '窗' in str(c.get('名称', '')):
                 measured += 1
+        if not measured:
+            # v6.6: CAD 实测洞口未检出 — 门窗表为权威(大修), 但几何侧零检出
+            # 说明洞口提取可能失效, 作为质检信号进图纸问题清单(原逻辑静默跳过)
+            problems.append({
+                '类别': '门窗量口径', '严重程度': '低',
+                '位置': '门窗表 vs CAD实测',
+                '问题': f'设计门窗表{n_total}樘(权威), CAD 实测洞口未检出(0 樘), 仅以门窗表为准',
+                '建议': '复核平面图门窗洞口几何提取, 确认门窗表数量与现场一致',
+            })
+            return problems
         if measured and abs(measured - n_total) >= max(3, int(n_total * 0.1)):
             problems.append({
                 '类别': '门窗量口径', '严重程度': '中',

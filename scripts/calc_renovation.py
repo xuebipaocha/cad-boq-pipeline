@@ -142,6 +142,31 @@ def _parse_finishing_table(recog):
     return rows_out
 
 
+def _room_kw_match(pos_text, rooms):
+    """v6.6: 部位文本 → 命中的房间组列表。
+    部位如 '分段：办公室' / '办公室，走廊，楼梯间' / '卫1、卫3、卫4'。
+    返回 (命中房间组列表, 未命中部位词列表)。
+    """
+    from room_geometry import ROOM_KEYWORDS
+    matched, unmatched = [], []
+    # 提取部位词: 房间关键词 + 卫N 编号
+    words = re.findall(r'卫\s*\d+|' + '|'.join(ROOM_KEYWORDS), pos_text or '')
+    for w in words:
+        w = w.strip()
+        hit = None
+        for r in rooms:
+            if w in r.get('房间名', '') or r.get('房间名', '') in w:
+                hit = r
+                break
+        if hit:
+            if not any(m is hit for m in matched):
+                matched.append(hit)
+        else:
+            if w not in unmatched:
+                unmatched.append(w)
+    return matched, unmatched
+
+
 def _interior_finishing(data):
     """v6.4: 室内装饰重做算量 — 做法表(楼/墙/棚/窗台)驱动 + 施工范围(一至三层) + 平面面积×层数。
 
@@ -179,6 +204,7 @@ def _interior_finishing(data):
     area_map = {'楼面_m2': round(plane_area * floors, 2),
                 '顶棚_m2': round(plane_area * floors, 2),
                 '墙面_m2': round(perimeter * floor_h * floors, 2)}
+    rooms = data.get('房间') or []
     for r in rows:
         code = (r.get('编号') or '').strip()
         name = (r.get('名称') or '').strip()
@@ -191,6 +217,27 @@ def _interior_finishing(data):
             note += f' {pos}'
         if recipe:
             note += f' {recipe[:46]}'
+        # v6.6: 做法分劈 — 部位全部命中房间几何 → 按房间实算; 部分/全不命中 → 保持估算
+        room_hits, room_miss = _room_kw_match(pos, rooms) if rooms else ([], [])
+        if room_hits and not room_miss:
+            area_sum = sum(float(rr.get('面积_m2', 0) or 0) for rr in room_hits)
+            perim_sum = sum(float(rr.get('周长_m', 0) or 0) for rr in room_hits)
+            n_rooms = sum(int(rr.get('数量', 1) or 1) for rr in room_hits)
+            if code.startswith('楼'):
+                q = round(area_sum * floors, 2)
+                note += f'; 面积=房间{area_sum}m²×{floors}层({n_rooms}间, 实测房间分区)'
+                items.append(_q(f'室内楼地面{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                continue
+            elif code.startswith('墙'):
+                q = round(perim_sum * floor_h * floors, 2)
+                note += f'; 面积=房间周长{perim_sum}m×层高{floor_h}×{floors}层({n_rooms}间, 实测房间分区)'
+                items.append(_q(f'室内墙面{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                continue
+            elif code.startswith('棚'):
+                q = round(area_sum * floors, 2)
+                note += f'; 面积=房间{area_sum}m²×{floors}层({n_rooms}间, 实测房间分区)'
+                items.append(_q(f'室内顶棚{name}', 'm²', q, note, SRC_MEASURED, 部位=pos))
+                continue
         if code.startswith('楼'):
             q = area_map['楼面_m2']
             note += f'; 面积=平面{plane_area}×{floors}层(待核,多做法需按房间分劈)'
@@ -378,8 +425,14 @@ def calc(data):
     if '门窗' in tc or any('门窗' in (d.get('部位') or '') for d in (data.get('设计意图') or {}).get('设计内容', []) or []):
         if windows:
             total_area = round(sum(float(w.get('洞口面积_m2', 0) or 0) * int(w.get('数量', 1) or 1) for w in windows), 2)
-            n_doors = sum(int(w.get('数量', 1) or 1) for w in windows if str(w.get('门窗号', '')).startswith('M'))
-            n_wins = sum(int(w.get('数量', 1) or 1) for w in windows if str(w.get('门窗号', '')).startswith('C'))
+            # v6.6: 门窗归类 — LC-* 是铝合金窗(原 startswith('C') 漏数 LC, 94 樘窗全丢),
+            # M-/WM- 是门; 编号含'窗'字也算窗
+            def _is_door(wid):
+                return wid.startswith('M') or wid.startswith('WM') or '门' in wid
+            def _is_win(wid):
+                return 'LC' in wid or wid.startswith('C') or '窗' in wid
+            n_doors = sum(int(w.get('数量', 1) or 1) for w in windows if _is_door(str(w.get('门窗号', ''))))
+            n_wins = sum(int(w.get('数量', 1) or 1) for w in windows if _is_win(str(w.get('门窗号', ''))))
             r.append(_q('门窗更换', '樘', n_doors + n_wins,
                         f'门{n_doors}樘+窗{n_wins}樘(门窗表)', SRC_TEXT))
             r.append(_q('门窗拆除', '樘', n_doors + n_wins,

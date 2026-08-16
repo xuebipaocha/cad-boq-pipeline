@@ -307,8 +307,15 @@ def _parse_tables_in_column(texts):
                     if hbi is not None and hbi < len(seg_cols_sorted):
                         id_key = seg_cols_sorted[hbi]
                         id_val = ' '.join(seg_cells.get(id_key, []) or []).strip()
-                        if not re.fullmatch(r'[\u4e00-\u9fa5]{1,3}\d{1,2}', id_val):
+                        # v6.6: 编号列存在时校验编号格式(楼1/墙1/棚1);
+                        # 但市政等专业做法表无编号列/编号列为数字(20cm级配碎石), 不在此拦截
+                        if not re.fullmatch(r'[\u4e00-\u9fa5]{1,3}\d{1,2}', id_val) \
+                                and not re.fullmatch(r'\d+cm[\u4e00-\u9fa5]+', id_val) \
+                                and not re.search(r'[\u4e00-\u9fa5]{2,}', id_val):
                             continue
+                    # v6.6: 表头无'编号'列时不做首列编号校验 —
+                    # 构造层质量由 table_to_layers 特征词/长度过滤把关(首列校验曾误挡
+                    # 市政做法表 '细粒式沥青混凝土/水泥稳定碎石基层' 等无编号行)
                 data_rows.append({
                     'y': rows[rj]['y'],
                     # v6.4: 严格按表头列序补全(缺列填空) — 保证 cells 与 headers 长度/位置对齐,
@@ -349,6 +356,12 @@ def table_to_layers(table):
                 name_idx = i
                 break
     layers = []
+    # v6.6: 构造层特征词 — 行必须含其一才算构造层(真实图纸表格混排时,
+    # 目录行/规范引用/砂浆品种表/拆除平面图等噪声行不再混入构造层)
+    LAYER_FEATURE_KW = ('厚', '面层', '基层', '垫层', '找平', '防水', '涂料', '砂浆',
+                        '混凝土', '沥青', '碎石', '砖', '板', '龙骨', '地板', '地面',
+                        '墙面', '顶棚', '天棚', '漆', '腻子', '卷材', '石材', '瓷砖',
+                        '粘接剂', '保温', '隔声', '防腐')
     for row in table['rows']:
         cells = row['cells']
         if name_idx >= len(cells):
@@ -356,9 +369,22 @@ def table_to_layers(table):
         name = cells[name_idx]
         if not name or len(name) < 2:
             continue
+        # v6.6: 名称过长(>28字符)不是构造层 — 混排表把整段说明文字拼进名称列
+        if len(name) > 28:
+            continue
         # v4.3: 行有效性过滤 — 排除面积标注/平法标注/门窗号等非构造层行
         if re.search(r'面积\s*\d+', name) or re.search(r'[A-Z]{1,3}\d+\s*\d+[×xX]\d+', name) \
            or re.match(r'^[A-Za-z]{1,3}\d{3,4}$', name) or any(c in name for c in '▲▼'):
+            continue
+        # v6.6: 构造层特征过滤 — 名称须含构造层特征词(排除 规范引用GB/JGJ、
+        # 砂浆品种表(WM/WPM)、'建筑高度19m'、'燃烧性能A级'、'4 拆除平面图' 等混排噪声)
+        if not any(k in name for k in LAYER_FEATURE_KW):
+            continue
+        if re.search(r'GB\s?\d|JGJ|JG/T|02J\d|图集|平面示意|剖面图|详图', name):
+            continue
+        # v6.6: 构造层名称不含句子标点(。；，、) — 段落性说明/砂浆品种表
+        # ('WMM5、DMM5M5 混合砂浆'/'五、主要材料及构造设计…')混入会污染清单特征
+        if any(c in name for c in '。；，、；'):
             continue
         thick = None
         if thick_idx is not None and thick_idx < len(cells):
