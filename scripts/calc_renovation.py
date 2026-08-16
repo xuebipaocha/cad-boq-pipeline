@@ -455,14 +455,26 @@ def calc(data):
                 return wid.startswith('M') or wid.startswith('WM') or '门' in wid
             def _is_win(wid):
                 return 'LC' in wid or wid.startswith('C') or '窗' in wid
+            # v6.9.3: 按 类型(门/窗) × 材质 分组拆项 — 造价人列项方式, 组价按材质
+            # 匹配定额(塑钢门→8-9 塑钢成品门安装, 塑钢窗→8-71); 材质未注明标'未注明'
+            groups = {}
+            for w in windows:
+                wid = str(w.get('门窗号', ''))
+                mat = str(w.get('材质', '') or '').strip() or '未注明'
+                key = ('门' if _is_door(wid) else '窗', mat)
+                area = float(w.get('洞口面积_m2', 0) or 0) * int(w.get('数量', 1) or 1)
+                groups[key] = groups.get(key, 0) + area
             n_doors = sum(int(w.get('数量', 1) or 1) for w in windows if _is_door(str(w.get('门窗号', ''))))
             n_wins = sum(int(w.get('数量', 1) or 1) for w in windows if _is_win(str(w.get('门窗号', ''))))
-            r.append(_q('门窗更换', 'm²', total_area,
-                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 洞口面积合计{total_area}m²)'
-                        '；按GB50854§4.0.8双单位选m²(与定额计量单位一致, 樘数见备注)', SRC_TEXT))
-            r.append(_q('门窗拆除', 'm²', total_area,
-                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 洞口面积合计{total_area}m²)'
-                        '；按GB50854§4.0.8双单位选m²', SRC_TEXT))
+            for (typ, mat), area in groups.items():
+                area = round(area, 2)
+                mat_disp = mat if mat != '未注明' else '未注明材质'
+                r.append(_q(f'{mat_disp}{typ}更换', 'm²', area,
+                            f'{mat_disp}{typ} 洞口面积{area}m²(门窗表)；按GB50854§4.0.8选m²', SRC_TEXT))
+                r.append(_q(f'{mat_disp}{typ}拆除', 'm²', area,
+                            f'{mat_disp}{typ} 洞口面积{area}m²(门窗表)；与更换配套', SRC_TEXT))
+            r.append(_q('门窗更换(汇总)', '樘', n_doors + n_wins,
+                        f'门{n_doors}樘+窗{n_wins}樘(门窗表, 面积分项见上)', SRC_TEXT))
             r.append(_q('门窗洞口面积', 'm²', total_area,
                         f'{total_area}m²(门窗表洞口合计, 墙扣减用)', SRC_TEXT))
         else:

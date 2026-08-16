@@ -455,6 +455,11 @@ def run(dwg_file, output_dir):
                                     nums += [1] * (len(id_tokens) - len(nums))
                                 elif len(nums) > len(id_tokens):
                                     nums = nums[:len(id_tokens)]
+                                # v6.9.3: 材质提取(组价按材质匹配定额) — 门窗表备注列
+                                # ('钢质门'/'塑钢门'/'塑钢窗') → 材质字段
+                                mat_words = [w for w in ('钢质', '塑钢', '木质', '铝合金', '断桥铝',
+                                                         '推拉', '平开', '防火', '玻璃', '复合')
+                                             if w in row_text]
                                 for j, wd_id in enumerate(id_tokens):
                                     w = h = 0
                                     if j < len(dims):
@@ -467,6 +472,7 @@ def run(dwg_file, output_dir):
                                     window_doors.append({
                                         '门窗号': wd_id, '宽_mm': w, '高_mm': h, '数量': n,
                                         '洞口面积_m2': round(w * h / 1e6, 4),
+                                        '材质': '、'.join(mat_words) if mat_words else '',
                                     })
                             except (ValueError, TypeError, IndexError):
                                 continue
