@@ -64,7 +64,7 @@ def detect_structure_type(texts):
     # v6.9.7: 工程性质优先(大修/改造决定单方造价画像区间)
     for kw in ('大修', '改造', '维修', '拆除'):
         if kw in hay:
-            found.append('大修')
+            found.append('改造')
             break
     for kw in ('剪力墙', '砖混', '砌体', '框架', '轻钢', '门式刚架', '钢结构'):
         if kw in hay:

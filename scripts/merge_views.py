@@ -312,7 +312,7 @@ def merge_views(view_results):
         '_merge_notes': notes,
         '_multi_view': True,
     }
-    # v5.15 修复: 多视图工程性质汇总 — 任一视图判"大修与改造"则继承
+    # v5.15 修复: 多视图工程性质汇总 — 任一视图判"改造"则继承
     # (平面图含施工说明判定大修, 立面/剖面无说明判新建, 不能丢)
     nature_hits = {}
     for v in views:
@@ -320,8 +320,8 @@ def merge_views(view_results):
         if nv:
             nature_hits[nv] = nature_hits.get(nv, 0) + 1
     if nature_hits:
-        if nature_hits.get('大修与改造'):
-            merged['工程性质'] = '大修与改造'
+        if nature_hits.get('改造'):
+            merged['工程性质'] = '改造'
         else:
             merged['工程性质'] = max(nature_hits, key=nature_hits.get)
     return merged
@@ -363,7 +363,7 @@ def merge_drawing_files(dwg_files, output_dir=None, specialty=None):
     try:
         combined = merge_views(views)
         combined['视图'] = views
-        # v5.15 修复: 多视图工程性质汇总 — 任一视图判"大修与改造"则继承
+        # v5.15 修复: 多视图工程性质汇总 — 任一视图判"改造"则继承
         # (平面图含施工说明判定大修, 立面/剖面无说明判新建, 不能丢)
         nature_hits = {}
         for v in views:
@@ -372,9 +372,9 @@ def merge_drawing_files(dwg_files, output_dir=None, specialty=None):
             if nv:
                 nature_hits[nv] = nature_hits.get(nv, 0) + 1
         if nature_hits:
-            # 大修与改造 优先(翻新项目信号比新建强), 其次取多数
-            if nature_hits.get('大修与改造'):
-                combined['工程性质'] = '大修与改造'
+            # 改造 优先(翻新项目信号比新建强), 其次取多数
+            if nature_hits.get('改造'):
+                combined['工程性质'] = '改造'
             else:
                 combined['工程性质'] = max(nature_hits, key=nature_hits.get)
         print(f'  ✅ 合并去重完成: {len(views)}个视图, 构造层{len(combined.get("构造层", []))}个, '

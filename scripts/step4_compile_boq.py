@@ -688,7 +688,7 @@ def run(calc_json, output_dir):
         try:
             from knowledge_query import query_checklist
             nature = recog_data.get('工程性质', '')
-            cl = query_checklist(specialty, '大修与改造' if '大修' in nature else '')
+            cl = query_checklist(specialty, '改造' if '大修' in nature else '')
             all_names = ' '.join(
                 [str(i.get('source_name', '')) for i in boq_items] +
                 [str(e.get('分项名称', '')) for e in estimated_items] +

@@ -134,7 +134,7 @@ def run_knowledge_checks(pid):
             out['规则依据'][r.get('规则项', kw)] = r
     # 漏项检查(工程性质大修→大修表)
     nature = pid.get('工程性质', '')
-    hint = '大修与改造' if '大修' in nature else ''
+    hint = '改造' if ('大修' in nature or '改造' in nature) else ''
     cl = query_checklist(specialty, hint)
     for k, v in cl.items():
         out['漏项检查'].append(f'{k} 常见项: ' + '、'.join(v[:14]))

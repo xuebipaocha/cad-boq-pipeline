@@ -167,7 +167,7 @@ def calculate(drawing_data):
     specialty = drawing_data.get('专业类型', '房屋建筑与装饰工程')
     # v5.4 D6: 大修/改造 + 房建 → 专用计算器, 跳过规则引擎与新建模板
     # (规则引擎是"关键词驱动"的新建分项, 大修图纸会误触发土方/场地平整等)
-    if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '大修与改造':
+    if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '改造':
         try:
             from calc_renovation import calc as calc_renovation
             return _attach_basis(drawing_data, _apply_scope_mask(drawing_data, calc_renovation(drawing_data)))
@@ -218,7 +218,7 @@ def calculate(drawing_data):
     }
     # v5.4 D6: 工程性质分发 — 大修/改造 + 房建 → calc_renovation(专用计算器)
     project_nature = drawing_data.get('工程性质', '新建')
-    if specialty == '房屋建筑与装饰工程' and project_nature == '大修与改造':
+    if specialty == '房屋建筑与装饰工程' and project_nature == '改造':
         mod_name = 'calc_renovation'
     else:
         mod_name = CALC_MAP.get(specialty)

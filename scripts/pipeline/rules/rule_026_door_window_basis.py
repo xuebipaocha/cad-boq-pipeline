@@ -27,7 +27,7 @@ class DoorWindowBasisRule(RuleBase):
     def check(self, drawing_data):
         problems = []
         nature = drawing_data.get('工程性质', '')
-        if nature not in ('大修与改造', '大修', '改造', '翻新'):
+        if nature not in ('改造', '大修', '改造', '翻新'):
             return problems  # 仅大修/改造类项目适用
         windows = drawing_data.get('门窗', []) or []
         if not windows:

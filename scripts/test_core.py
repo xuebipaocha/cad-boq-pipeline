@@ -90,7 +90,7 @@ def test_project_nature():
     from step1_recognize import detect_project_nature
     # 大修: 拆除关键词多
     nature, detail = detect_project_nature(['拆除外墙饰面', '拆除旧防水层', '大修工程', '维修裂缝'])
-    assert nature == '大修与改造', f'应判大修: {nature} {detail}'
+    assert nature == '改造', f'应判大修: {nature} {detail}'
     assert detail['分数'] >= 4, f'分数不足: {detail}'
     # 新建: 无拆除词
     nature2, _ = detect_project_nature(['新建厂房', '结构施工图', '钢筋混凝土框架'])

@@ -21,8 +21,10 @@ SPECIALTY_KEYWORDS = {
 }
 MATERIALS = ['沥青混凝土','水泥稳定碎石','级配碎石','混凝土','钢筋混凝土','砂浆','砌体','钢筋','防水卷材','乳化沥青','石油沥青','种植土','钢板','H型钢']
 
-# ── v5.4 工程性质判定: 新建 / 大修与改造 ──
-# 大修/改造信号(施工说明中的关键词, 权重为出现频次倍率)
+# ── v5.4 工程性质判定: 新建 / 改造 ──
+# 改造信号关键词(施工说明中的关键词, 权重为出现频次倍率)
+# 注: 工程性质对外只有「新建 / 改造」两类; 表中的"大修"是**同义词线索**——
+# 图纸写"本工程为大修"仍是判为"改造"的强信号(权重 3)。
 # 注意: '修改' 不入词表 — 它是图纸修订记录(2026.2.26修改), 非工程改造信号
 RENOVATION_KEYWORDS = {
     '拆除': 3, '维修': 2, '更换': 2, '大修': 3, '翻新': 2,
@@ -131,10 +133,11 @@ def _parse_design_notes_pid(texts):
 
 
 def detect_project_nature(texts):
-    """工程性质判定: 新建 / 大修与改造。
-    加权打分: 大修信号(拆除/维修/更换...) vs 新建信号。
-    判定规则: 大修总分 ≥4 才判大修与改造(保守阈值, 弱信号如'更换×1'
-    默认新建 — 避免带修订记录的新建设计图误判)。
+    """工程性质判定: **新建 / 改造** 两类(v6.10.1 用户口径)。
+
+    加权打分: 改造信号(拆除/维修/更换/翻新/修缮...) vs 新建信号。
+    判定规则: 改造总分 ≥4 才判"改造"(保守阈值, 弱信号如'更换×1'默认新建 —
+    避免带修订记录的新建设计图误判); 图纸文字中的"大修"作为改造的**同义线索词**保留。
     """
     hay = ' '.join(texts or [])
     ren_score = 0
@@ -152,8 +155,24 @@ def detect_project_nature(texts):
             new_score += n * w
             new_hits.append(f'{kw}×{n}')
     if ren_score >= 4:
-        return '大修与改造', {'分数': ren_score, '证据': ren_hits, '新建分数': new_score}
-    return '新建', {'分数': new_score, '证据': new_hits, '大修分数': ren_score}
+        return NATURE_RENO, {'分数': ren_score, '证据': ren_hits, '新建分数': new_score}
+    return NATURE_NEW, {'分数': new_score, '证据': new_hits, '改造分数': ren_score}
+
+
+# ── v6.10.1 工程性质两类口径(用户确认: 只有新建 / 改造) ──
+NATURE_NEW = '新建'
+NATURE_RENO = '改造'
+# 历史取值归一: 旧版本输出 '大修与改造'; 图纸/文档中也可能写 '大修'/'改建'
+NATURE_ALIASES = {'大修与改造': NATURE_RENO, '大修': NATURE_RENO, '改建': NATURE_RENO}
+
+
+def normalize_nature(v):
+    """任意历史工程性质取值 → 「新建 / 改造」两类(未知值原样返回)。
+
+    用途: 消费旧 pid JSON(可能含 '大修与改造')时先归一, 避免分支判定失效。
+    """
+    s = str(v or '').strip()
+    return NATURE_ALIASES.get(s, s)
 
 
 def detect_specialty_detail(layers, texts):
@@ -342,7 +361,7 @@ def run(dwg_file, output_dir):
     specialty, sp_conf, sp_candidates = detect_specialty_detail([l.get('name','') for l in result.get('layers',[])], raw_texts)
     print(f'  识别专业: {specialty} (置信度 {sp_conf})')
 
-    # ── v5.4 工程性质判定: 新建 / 大修与改造 ──
+    # ── v5.4 工程性质判定: 新建 / 改造 ──
     nature, nature_detail = detect_project_nature(raw_texts)
     print(f'  工程性质: {nature} {nature_detail.get("证据")}')
 
@@ -524,7 +543,7 @@ def run(dwg_file, output_dir):
     pid = {
         '专业类型': specialty,
         '专业识别': {'置信度': sp_conf, '候选': sp_candidates},
-        '工程性质': nature,  # v5.4: 新建 / 大修与改造
+        '工程性质': nature,  # v5.4: 新建 / 改造
         '工程性质证据': nature_detail,
         '图纸元数据': {'单位': result.get('metadata',{}).get('unit','mm'), 'insunits': insunits, '实体总数': result.get('metadata',{}).get('entity_total',0),
                       **(_extract_title_block_pid(dwg_file) if 'dwg_file' in dir() else {})},  # v6.3 C2: 图签(图名/图号/比例)

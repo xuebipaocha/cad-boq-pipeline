@@ -309,7 +309,7 @@ def _facade_area(recog):
 
 def _q(name, unit, qty, note, src, **kw):
     item = {'分项名称': name, '单位': unit, '工程量': round(qty, 2),
-            '计算式': note, '定额编号': '', '备注': '大修', '数据来源': src}
+            '计算式': note, '定额编号': '', '备注': '改造', '数据来源': src}
     item.update(kw)
     return item
 
