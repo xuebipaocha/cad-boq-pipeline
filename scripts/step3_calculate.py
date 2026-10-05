@@ -123,37 +123,64 @@ def calculate_by_formula(fc, data, rule_text=''):
 
 def _apply_scope_mask(drawing_data, results):
     """v6.5: 施工范围掩码 — 设计内容(设计意图范围) + 不含项 裁剪算量分项。
-    范围外分项标记'范围外', 不进清单。"""
+    范围外分项标记'范围外', 不进清单。
+
+    v6.10.3 安全阀(真实图纸实测驱动): 渔轮办公楼/老涂装场地因**设计内容解析出垃圾条目**
+    ("基础平面布置图"/"施工前应…"/"量3.0kg/m" 等说明碎片被当作 部位+对象) → scope_parts
+    与任何分项名都不匹配 → 全部分项判"范围外" → 算量清零、清单只剩自补 1 项。
+    **全杀比不杀更糟**(违背"错误结果比缺失更坏"), 故:
+      ① 过滤噪声条目(部位/对象含图/说明/规范/mm 等 → 非部位名);
+      ② 若掩码将排除 >80% 分项且分项数≥3 → 判"设计内容解析不可靠" → 不排除, 只加待核提示。
+    """
     try:
         intent = (drawing_data.get('设计意图') or {})
         excludes = (intent.get('算量边界') or {}).get('不含项') or []
         design_scope = (intent.get('设计内容') or []) or []
         if excludes or design_scope:
             scope_parts = set()
+            NOISE = ('图', '说明', '规范', '要求', '施工', '试验', '详图', '备注', '荷载',
+                     '布置', '%%', 'mm', 'kg', '配筋', '锚固')
             for it in design_scope:
-                p = it.get('部位') or ''
-                o = it.get('对象') or ''
+                p = str(it.get('部位') or '').strip()
+                o = str(it.get('对象') or '').strip()
+                if any(k in p or k in o for k in NOISE):
+                    continue
+                if len(p) > 12 or len(o) > 12:
+                    continue
                 if p:
                     scope_parts.add(p)
                 if o and o != '墙':
                     scope_parts.add(o)
+            # 先算候选, 不立即写入(便于安全阀判定)
+            cand = []
             for it in results:
                 nm = it.get('分项名称', '')
                 out_reason = ''
-                # 1) 不含项显式排除
+                # 1) 不含项显式排除(明确证据, 不受安全阀影响)
                 for ex in excludes:
                     if ex and ex.strip() and ex.strip() in nm:
                         out_reason = f'施工范围不含[{ex.strip()}]'
                         break
-                # 2) 大修有设计内容但分项不在范围内 → 范围外(待确认)
+                # 2) 设计内容未覆盖(推定, 可能因解析质量差而误杀)
                 if not out_reason and scope_parts:
-                    # v6.9.3: '门窗'对象覆盖所有门/窗分项(钢质门更换/塑钢窗更换…
-                    # 材质拆项后名称含'门'或'窗'但不再含'门窗'连续词)
+                    # v6.9.3: '门窗'对象覆盖所有门/窗分项(材质拆项后名称不再含'门窗'连续词)
                     in_scope = any(p in nm for p in scope_parts if p)
                     if not in_scope and '门窗' in scope_parts and any(k in nm for k in ('门', '窗')):
                         in_scope = True
                     if not in_scope:
                         out_reason = '设计内容未覆盖该分项'
+                cand.append((it, out_reason))
+
+            presumed = [c for c in cand if c[1].startswith('设计内容未覆盖')]
+            if len(results) >= 3 and len(presumed) / max(len(results), 1) > 0.8:
+                # 安全阀: 掩码几乎全杀 → 判解析不可靠, 不做排除(避免零产出)
+                for it, reason in cand:
+                    it.setdefault('备注', '')
+                    tag = '范围掩码不可靠(设计内容解析存疑), 未做范围排除, 请人工核对施工范围'
+                    it['备注'] = (it['备注'] + '；' if it['备注'] else '') + tag
+                return results
+
+            for it, out_reason in cand:
                 if out_reason:
                     it['范围外'] = True
                     it.setdefault('备注', '')
