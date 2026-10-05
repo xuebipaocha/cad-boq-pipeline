@@ -121,6 +121,97 @@ def calculate_by_formula(fc, data, rule_text=''):
     return 0, '未知公式'
 
 
+def _attach_extended_entities(drawing_data, results):
+    """v6.10.4: 把 v6.10 新解析的扩展实体**接入算量**（此前只解析、未消费）。
+
+    ① HATCH 填充区域 → 按图层关键词匹配分项，面积(mm²→m²)补入无量分项；
+    ② MLINE 多线墙   → 墙长(m)补入无量的墙类分项；
+    ③ LEADER 引线    → 关联文字写入同名分项备注（做法依据，供特征编写/组价）。
+    原则(PRINCIPLES 元原则三): **只补缺失, 不覆盖既有实测**；每条补入写明来源与数量(可审计)。
+    """
+    ext = drawing_data.get('扩展实体') or {}
+    if not ext or not results:
+        return results
+    N = 0
+
+    HATCH_KW = ('防水', '保温', '地面', '屋面', '铺装', '垫层', '涂装', '地坪', '楼面', '散水')
+    # 实测(4 份真实图)驱动: 填充图层名**不可靠**(0 层 / '.' 层 / GZ·MJ·DETL_REIN 等缩写),
+    # 面积分布极端(老涂装 '.' 层 13929m² 与 0 层 11296 个碎片共 5.4m² 并存)。
+    # 故 ① 只取 ≥5m² 的实质区域(小碎片是图案/剖面填充, 非区域 —— 同时是性能预筛);
+    #    ② 图层名与分项名**双向**匹配(图层名常为简称, 单向易漏);
+    #    ③ 未匹配的大面积填充记入 pid['填充区域参考'] 供人工参考 —— 不强行匹配(避免错误量)。
+    MIN_HATCH_M2 = 5.0
+    agg = {}
+    big_ref = []
+    for h in (ext.get('hatch') or []):
+        lay = str(h.get('layer') or '')
+        a_m2 = float(h.get('area') or 0) / 1e6
+        if a_m2 < MIN_HATCH_M2:
+            continue
+        big_ref.append((round(a_m2, 1), lay))
+        for kw in HATCH_KW:
+            if kw in lay:
+                d = agg.setdefault(kw, {'面积': 0.0, '图层': set(), '数量': 0})
+                d['面积'] += a_m2
+                d['图层'].add(lay)
+                d['数量'] += 1
+                break
+    for it in results:
+        nm = str(it.get('分项名称', ''))
+        qty = it.get('工程量') or 0
+        src_ = str(it.get('数据来源') or '')
+        if qty and src_ not in ('', '待提取', '估算', '待核实'):
+            continue                      # 已有实测 → 不覆盖
+        for kw, d in agg.items():
+            if kw in nm and d['数量']:
+                it['工程量'] = round(d['面积'], 2)
+                it['单位'] = it.get('单位') or 'm²'
+                it['计算式'] = (f"填充区域实测 {d['数量']} 个(图层 {sorted(d['图层'])[:2]}) "
+                              f"合计 {round(d['面积'], 2)}m²")
+                it['数据来源'] = '实测(填充区域)'
+                it['备注'] = ((it.get('备注') or '') + '；' if it.get('备注') else '') + \
+                    '由 HATCH 填充区域实测补入(扩展实体接入)'
+                N += 1
+                break
+
+    ml = ext.get('mline') or []
+    if ml:
+        total_m = sum(float(m.get('length') or 0) for m in ml) / 1000.0
+        if total_m > 0:
+            for it in results:
+                nm = str(it.get('分项名称', ''))
+                if '墙' in nm and not (it.get('工程量') or 0):
+                    it['工程量'] = round(total_m, 2)
+                    it['单位'] = it.get('单位') or 'm'
+                    it['计算式'] = f"多线墙实测 {len(ml)} 道 合计 {round(total_m, 2)}m(多线样式壁厚)"
+                    it['数据来源'] = '实测(多线墙)'
+                    it['备注'] = ((it.get('备注') or '') + '；' if it.get('备注') else '') + \
+                        '由 MLINE 多线墙实测补入(扩展实体接入)'
+                    N += 1
+                    break
+
+    for ld in (ext.get('leader') or [])[:20]:
+        txt = str(ld.get('nearby_text') or '').strip()
+        if len(txt) < 2:
+            continue
+        for it in results:
+            nm = str(it.get('分项名称', ''))
+            if len(nm) >= 2 and nm[:2] in txt:
+                it['备注'] = ((it.get('备注') or '') + '；' if it.get('备注') else '') + \
+                    f'引线标注依据: {txt[:40]}'
+                break
+
+    if big_ref:
+        big_ref.sort(reverse=True)
+        drawing_data['填充区域参考'] = [{'面积_m2': a, '图层': l} for a, l in big_ref[:10]]
+        top = ' / '.join(f'{a}m²({l[:10]})' for a, l in big_ref[:3])
+        print(f'  填充区域参考(≥{MIN_HATCH_M2}m²): {len(big_ref)} 个, 最大 {top}')
+    if N:
+        drawing_data['扩展实体接入'] = {'补实测分项': N}
+        print(f'  扩展实体接入算量: 补实测 {N} 项(填充/多线墙)')
+    return results
+
+
 def _apply_scope_mask(drawing_data, results):
     """v6.5: 施工范围掩码 — 设计内容(设计意图范围) + 不含项 裁剪算量分项。
     范围外分项标记'范围外', 不进清单。
@@ -197,7 +288,9 @@ def calculate(drawing_data):
     if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '改造':
         try:
             from calc_renovation import calc as calc_renovation
-            return _attach_basis(drawing_data, _apply_scope_mask(drawing_data, calc_renovation(drawing_data)))
+            return _attach_basis(drawing_data, _apply_scope_mask(
+                drawing_data, _attach_extended_entities(
+                    drawing_data, calc_renovation(drawing_data))))
         except Exception as e:
             print(f'  大修计算器跳过: {e}')
             # 回退到常规路径
@@ -332,7 +425,7 @@ def _attach_basis(drawing_data, results):
     except Exception:
         for it in results:
             it.setdefault('依据', '待查证')
-    return results
+    return _attach_extended_entities(drawing_data, results)
 
 
 def _infer_source(item):

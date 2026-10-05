@@ -182,7 +182,7 @@ def extract_spline(msp, flatten_dist=20.0):
     return out
 
 
-def extract_hatch(msp):
+def extract_hatch(msp, flatten_dist=50.0):
     """HATCH 填充 → [{layer, pattern, area, path_count, bbox}]
 
     面积 = 外环面积 − 内环(孤岛)面积; 用边界路径离散点计算。
@@ -197,7 +197,7 @@ def extract_hatch(msp):
             areas, boxes = [], []
             for p in e.paths:
                 try:
-                    pts = [(v[0], v[1]) for v in ezpath.from_hatch_boundary_path(p).flattening(20.0)]
+                    pts = [(v[0], v[1]) for v in ezpath.from_hatch_boundary_path(p).flattening(flatten_dist)]
                 except Exception:
                     pts = []
                 if len(pts) < 3:

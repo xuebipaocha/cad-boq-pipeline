@@ -30,6 +30,11 @@ RENOVATION_KEYWORDS = {
     '拆除': 3, '维修': 2, '更换': 2, '大修': 3, '翻新': 2,
     '改造': 2, '既有': 1, '原有': 1, '加固': 2, '恢复': 1,
 }
+# v6.10.4 性质词(项目性质强信号): 只有命中这些词才判"改造"。
+# 实测教训(4 份真实图): 渔轮办公楼仅"维修×1 + 更换×2"= 6 分即被判改造 —— 但"维修/更换/拆除"
+# 是**工序词**, 通用说明/规范条文里的这类词不代表项目性质; 真改造项目(老涂装 改造×11、
+# 船体大楼 大修×2+改造×2)均命中性质词。故: 工序词分≥4 且命中性质词 → 改造; 否则新建。
+NATURE_WORDS = ('改造', '大修', '翻新', '修缮', '改建', '扩建', '拆除重建')
 NEW_BUILD_KEYWORDS = {'新建': 3, '首建': 2, '施工图': 1}
 
 
@@ -154,9 +159,13 @@ def detect_project_nature(texts):
         if n > 0:
             new_score += n * w
             new_hits.append(f'{kw}×{n}')
-    if ren_score >= 4:
-        return NATURE_RENO, {'分数': ren_score, '证据': ren_hits, '新建分数': new_score}
-    return NATURE_NEW, {'分数': new_score, '证据': new_hits, '改造分数': ren_score}
+    nature_hits = [w for w in NATURE_WORDS if w in hay]
+    if ren_score >= 4 and nature_hits:
+        return NATURE_RENO, {'分数': ren_score, '证据': ren_hits,
+                             '新建分数': new_score, '性质词': nature_hits}
+    return NATURE_NEW, {'分数': new_score, '证据': new_hits, '改造分数': ren_score,
+                        '工序词分': ren_score,
+                        '未判改造原因': (None if ren_score < 4 else '无性质词(改造/大修/翻新/修缮…)')}
 
 
 # ── v6.10.1 工程性质两类口径(用户确认: 只有新建 / 改造) ──
@@ -311,6 +320,17 @@ def choose_area(result, insunits=4):
     if text_area > 0 and text_area >= poly_best and poly_best > 0 and text_area >= 2 * poly_best:
         area, source = text_area, '文字面积标注(图签权威)'
         notes.append(f'图签面积({text_area:.0f}m²)大于闭合轮廓({poly_best:.0f}m²), 采用图签值')
+    # v6.10.5: 多图幅混排 → 面积存疑(4 份真实图实测: 基础图 40m² / 办公楼 51m² / 外立面图 66m²
+    # 明显失真 —— 根因是"最大闭合多段线"在多图幅/详图混排图纸上取到的不是主平面)。
+    # 判据: 采用值偏小(<200m²) 且图内存在 ≥3 个同量级(≥其 30%)闭合区域 → 判多图幅混排, 面积待核。
+    # 只标存疑 + 列候选, **不擅改数值**(避免引入错误量)。
+    if area and area < 200 and len(poly_areas) >= 3:
+        near = [p.get('area_m2', 0) for p in poly_areas if p.get('area_m2', 0) >= area * 0.3]
+        if len(near) >= 3:
+            notes.append(
+                f'面积存疑: 采用值 {area:.0f}m² 偏小, 图内有 {len(near)} 个同量级闭合区域'
+                f'(最大 {max(all_areas) if all_areas else 0:.0f}m²) — 疑为多图幅/详图混排, '
+                f'主区域需人工确认')
     # v5.9: 几何验证独立交叉 — 差异 > 5 倍 → 面积待核
     sv = result.get('svg_validation', {}) or {}
     if sv.get('available') and sv.get('largest_closed') and area and sv['largest_closed'] > 0:
@@ -404,10 +424,20 @@ def run(dwg_file, output_dir):
             tables_info = parse_tables(_msp)
             window_doors = []  # v6.0: 门窗表 → 门窗明细(墙扣门窗)
             layers_from_table = []  # v6.6: 循环前初始化(首表为门窗表时 NameError 隐患)
-            table_layers_seen = set()  # v6.6: 多做法表累加去重(原为覆盖 — 多表图纸只剩最后一张)
+            table_layers_seen = set()
+            table_desc_rows = []  # v6.10.5: 描述型做法表文字(无构造层列时收此)  # v6.6: 多做法表累加去重(原为覆盖 — 多表图纸只剩最后一张)
             for tb in tables_info:
                 if tb['type'] == '做法表':
                     layers_from_table = table_to_layers(tb)
+                    if not layers_from_table and tb.get('rows'):
+                        # v6.10.5 描述型做法表兜底: 表头无 编号/厚度/材料 列(如三列同名
+                        # '建筑材料做法'、列被竖排文字切碎) → 构造层产不出; 此时把文字行
+                        # 收作'做法说明'素材(供特征/组价引用), **不编造构造层**。
+                        for _r in (tb.get('rows') or [])[:30]:
+                            _cells = _r.get('cells') if isinstance(_r, dict) else _r
+                            _txt = ' '.join(str(c) for c in (_cells or []) if c).strip()
+                            if len(_txt) >= 6:
+                                table_desc_rows.append(_txt[:140])
                     if layers_from_table:
                         # v6.6: 多张做法表逐张累加(真实图纸含 1+25+9+4+3+2 共6张做法表,
                         # 原逻辑后表覆盖前表, 44 层构造层最后只剩 2 层 — 算量厚度/材料大面积丢失)
@@ -554,6 +584,7 @@ def run(dwg_file, output_dir):
         '图纸问题候选': [n for n in result.get('validation',{}).get('notes',[])] + area_notes,
         'CAD分析': None,
         '表格': tables_info,
+        '做法说明': table_desc_rows,  # v6.10.5: 描述型做法表文字(未产出构造层时不丢内容)
         '门窗': window_doors if 'window_doors' in dir() else [],  # v6.0: 门窗明细(墙扣门窗)
         '房间': _detect_rooms_pid(dwg_file),  # v6.1: 房间分区几何化(闭合区域→房间面积/周长)
         '设计说明': _parse_design_notes_pid(raw_texts),  # v6.2: 设计说明专项解析(材料规格/做法/概况)
