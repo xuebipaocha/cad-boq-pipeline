@@ -548,6 +548,27 @@ def run(dwg_file, output_dir):
         '剖面算量': section_qty if 'section_qty' in dir() else [],
     }
 
+    # v6.10: 扩展实体解析(多线墙/样条/填充/引线/真表格/天正专业对象) — 此前全项目零处理
+    try:
+        from dxf_entities import extract_all
+        ext = extract_all(_msp) if _msp is not None else {}
+        if ext:
+            pid['扩展实体'] = ext
+            es = ext.get('summary') or {}
+            print(f"  扩展实体: 多线墙{es.get('多线墙', 0)} 样条{es.get('样条曲线', 0)} "
+                  f"填充{es.get('填充区域', 0)} 引线{es.get('引线标注', 0)} "
+                  f"真表格{es.get('真表格', 0)} 天正对象{es.get('天正对象', 0)}")
+            # 天正专业对象 → 图纸问题清单提示(几何语义丢失, 建议导出 T3/普通实体格式)
+            px = ext.get('proxy') or {}
+            if px.get('count'):
+                lays = list((px.get('layers') or {}).keys())[:3]
+                pid.setdefault('图纸问题候选', []).append(
+                    f"[天正专业对象] 检测到 {px['count']} 个 ACAD_PROXY_ENTITY(图层: {lays}) — "
+                    f"这类专业对象(墙/门窗/房间)导出 DXF 后几何语义丢失, 只能靠图层名/块名近似; "
+                    f"建议由设计方另存为 T3/普通实体格式后重新提供")
+    except Exception as e:
+        print(f'  ⚠ 扩展实体解析失败(跳过): {e}')
+
     # v6.3 B1: 设计说明文字做法 → 构造层补充(表格做法表缺失时的兜底 + 补充)
     try:
         dn = pid.get('设计说明') or {}

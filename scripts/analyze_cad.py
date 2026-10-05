@@ -12,11 +12,65 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 TOOLS_DIR = SKILL_DIR / "tools" / "oda"
 ODA_EXE = TOOLS_DIR / "ODAFileConverter.exe"
 
+# v6.10: 版本事实(实测 2026-08-19)
+#   本地部署: 21.5.15 (2021 年) | 代码此前期望: 27.1.16
+#   官方下载现状: ODA 已改为**需登录账号**(所有 MSI 直链 302 → sso.opendesign.com
+#   → account.opendesign.com/downloads), 因此无法自动下载安装 → 改为明确的手动指引。
+ODA_EXPECTED_VERSION = '27.1.16'
+ODA_DOWNLOAD_PAGE = 'https://www.opendesign.com/guestfiles/oda_file_converter'
+
+
+def _local_oda_version():
+    """从 tools/oda 内文件名推断本地 ODA 版本(如 *_21.5_15 → 21.5.15)。"""
+    try:
+        for p in TOOLS_DIR.iterdir():
+            m = re.search(r'_(\d+)\.(\d+)_(\d+)', p.name)
+            if m:
+                return '.'.join(m.groups())
+    except Exception:
+        pass
+    return ''
+
+
 # ODA替代查找路径（其他skill可能已安装）
 ALT_ODA = Path(__file__).resolve().parent.parent.parent / ".reasonix" / "skills" / "cad-drawing-analysis" / "tools" / "oda" / "ODAFileConverter.exe"
 
+def _oda_download_requires_login(timeout=20):
+    """探测 ODA 官方 MSI 直链是否需要登录账号(不跟随重定向, 看 3xx 的 Location)。
+
+    v6.10 实测(2026-08-19): 21.5.15/25.12.0/26.4.0/27.1.16 直链均 302 →
+    sso.opendesign.com(SAML) → account.opendesign.com/downloads, 即官方已要求登录。
+    注: 必须禁止 urllib 自动跟随重定向, 否则会拿到 SSO 的 HTML 页面而误判为可下载。
+    """
+    import urllib.request
+    import urllib.error
+
+    url = (f'https://download.opendesign.com/guestfiles/oda_file_converter/'
+           f'ODAFileConverter_{ODA_EXPECTED_VERSION}.msi')
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise urllib.error.HTTPError(req.full_url, code, f'redirect:{newurl}', headers, fp)
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(url, timeout=timeout)
+        return False  # 200 → 可直接下载
+    except urllib.error.HTTPError as e:
+        loc = ''
+        try:
+            loc = e.headers.get('Location', '') or ''
+        except Exception:
+            pass
+        if 'sso.opendesign.com' in loc or 'account.opendesign.com' in loc:
+            return True
+        return e.code in (301, 302, 303, 307, 308)
+    except Exception:
+        return False
+
+
 def _ensure_oda():
-    """确保ODA可用，找不到就自动下载"""
+    """确保 ODA 可用; 找不到时给出明确的手动获取指引(不再盲目自动下载)。"""
     if ODA_EXE.exists():
         return True
     if ALT_ODA.exists():
@@ -28,24 +82,34 @@ def _ensure_oda():
             shutil.rmtree(dst_dir)
         shutil.copytree(src_dir, dst_dir)
         return True
-    # 自动下载
+
+    local_v = _local_oda_version()
+    # v6.10: 官方下载需登录账号 → 直接给手动指引, 不浪费一次无用的下载尝试
+    if _oda_download_requires_login():
+        print('[ODA] 未找到 ODA File Converter, 且官方下载已需登录账号(实测 302 → account.opendesign.com/downloads)')
+        print(f'[ODA] 手动获取步骤: ① 打开 {ODA_DOWNLOAD_PAGE} 并登录/注册(免费)')
+        print(f'[ODA]              ② 下载 ODAFileConverter_{ODA_EXPECTED_VERSION}.msi')
+        print(f'[ODA]              ③ 解包到 {TOOLS_DIR} (msiexec /a <msi> /qn TARGETDIR=... 或 7-zip)')
+        print(f'[ODA] 本地版本: {local_v or "未部署"}; 期望 ≥ {ODA_EXPECTED_VERSION}'
+              f'(21.5 对新版 DWG 与部分天正导出支持有限)')
+        print('[ODA] 备用方案: 请设计方直接导出 DXF(零转换依赖, 最稳)')
+        return False
+
     print("[ODA] 未找到 ODA File Converter，正在自动下载...")
     try:
         import urllib.request
-        import zipfile
         os.makedirs(TOOLS_DIR, exist_ok=True)
-        # ODA MSI下载
-        url = "https://download.opendesign.com/guestfiles/oda_file_converter/ODAFileConverter_27.1.16.msi"
+        url = ("https://download.opendesign.com/guestfiles/oda_file_converter/"
+               f"ODAFileConverter_{ODA_EXPECTED_VERSION}.msi")
         msi_path = TOOLS_DIR / "ODAFileConverter.msi"
         urllib.request.urlretrieve(url, msi_path)
-        # 用msiexec静默安装
-        import subprocess
-        subprocess.run(["msiexec", "/a", str(msi_path), "/qn", f"TARGETDIR={TOOLS_DIR.parent}"], capture_output=True)
+        subprocess.run(["msiexec", "/a", str(msi_path), "/qn", f"TARGETDIR={TOOLS_DIR.parent}"],
+                       capture_output=True)
         print("[ODA] 安装完成")
         return ODA_EXE.exists()
     except Exception as e:
         print(f"[ODA] 下载失败: {e}")
-        print("[ODA] 请手动下载安装: https://www.opendesign.com/guestfiles/oda_file_converter")
+        print(f"[ODA] 请手动下载安装: {ODA_DOWNLOAD_PAGE}")
         return False
 
 EZ_DXF_OK = False
@@ -79,14 +143,63 @@ def check_env():
     return status
 
 
-def dwg_to_dxf(dwg_path, output_dir=None):
-    """用 ODA 将 DWG 转为 DXF"""
+# v6.10: 输出 DXF 版本可选(ODA 的 OutputVersion 参数) — 保底 ACAD2013, 可升 ACAD2018
+ODA_OUT_VERSIONS = ('ACAD2018', 'ACAD2013', 'ACAD2010', 'ACAD2007', 'ACAD2004', 'ACAD2000')
+ODA_DEFAULT_OUT_VERSION = 'ACAD2013'
+
+
+def _diagnose_convert_failure(code, out_txt, dwg_path):
+    """转换未产出 DXF 时的**分级诊断**(替代原来只有一句异常字符串)。
+
+    按常见成因给出可操作提示: ODA 缺失/版本不兼容/文件加密/损坏/权限/无输出。
+    """
+    hints = []
+    low = (out_txt or '').lower()
+    if code not in (0, None):
+        hints.append(f'ODA 退出码 {code}')
+    if 'password' in low or 'encrypt' in low:
+        hints.append('文件可能加密/带口令保护 → 请提供未加密图纸')
+    if any(k in low for k in ('version', 'unsupported', 'invalid', 'cannot read')):
+        hints.append(f'DWG 版本可能不被本地 ODA({_local_oda_version() or "未知"})支持 '
+                     f'→ 升级 ODA 或请设计方另存 DXF')
+    if 'permission' in low or 'access denied' in low:
+        hints.append('权限不足 → 检查文件/目录读写权限')
+    if not (out_txt or '').strip():
+        hints.append('ODA 无任何输出(常见于版本不兼容或文件损坏)')
+    try:
+        size = os.path.getsize(dwg_path)
+        if size < 4096:
+            hints.append(f'文件仅 {size} 字节, 可能不完整/损坏')
+    except Exception:
+        pass
+    hints.append('备用方案: 请设计方直接导出 DXF(零转换依赖, 最稳)')
+    msg = '转换未生成 DXF — ' + '; '.join(hints)
+    if (out_txt or '').strip():
+        msg += f' | ODA 输出: {out_txt.strip()[:200]}'
+    return msg
+
+
+def dwg_to_dxf(dwg_path, output_dir=None, dxf_version=None, audit=True, timeout=180):
+    """用 ODA 将 DWG 转为 DXF。
+
+    v6.10 增强:
+    - **输出 DXF 版本可配**: dxf_version 参数 > 环境变量 ODA_OUTPUT_VERSION > 默认 ACAD2013。
+      ACAD2013 兼容性保底; ACAD2018 保留更多新实体属性(ezdxf 亦可读)。
+    - **失败分级诊断**: 退出码 + ODA 输出 + 文件体积 → 定位成因(版本/加密/损坏/权限),
+      并给出手动与备用方案, 不再只返回一句异常。
+    返回 (dxf_path | None, err | None)。
+    """
     if not _ensure_oda():
-        return None, "ODA File Converter 不可用"
+        return None, 'ODA File Converter 不可用(参见上方获取指引)'
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="cad_")
     else:
         os.makedirs(output_dir, exist_ok=True)
+
+    out_ver = (dxf_version or os.environ.get('ODA_OUTPUT_VERSION')
+               or ODA_DEFAULT_OUT_VERSION)
+    if out_ver not in ODA_OUT_VERSIONS:
+        return None, f'不支持的输出 DXF 版本 {out_ver} (可选: {", ".join(ODA_OUT_VERSIONS)})'
 
     dwg_path = Path(dwg_path).absolute()
     output_dir = Path(output_dir).absolute()
@@ -96,16 +209,19 @@ def dwg_to_dxf(dwg_path, output_dir=None):
         shutil.copy2(dwg_path, tmp_path / dwg_path.name)
 
         cmd = [str(ODA_EXE), str(tmp_path), str(tmp_path),
-               "ACAD2013", "DXF", "0", "1", dwg_path.name]
+               out_ver, "DXF", "0", "1" if audit else "0", dwg_path.name]
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True,
-                           creationflags=0x08000000, timeout=180)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               creationflags=0x08000000, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, f'转换超时(>{timeout}s): 图纸过大或 ODA 无响应 — 可提高 timeout 或分图处理'
         except Exception as e:
-            return None, str(e)
+            return None, f'调用 ODA 失败: {e}'
 
         dxf_files = list(tmp_path.glob("*.dxf"))
         if not dxf_files:
-            return None, "转换后未生成 DXF 文件"
+            out_txt = ((r.stdout or '') + (getattr(r, 'stderr', '') or '')).strip()
+            return None, _diagnose_convert_failure(r.returncode, out_txt, dwg_path)
         dest = output_dir / dxf_files[0].name
         shutil.move(str(dxf_files[0]), str(dest))
         return dest, None

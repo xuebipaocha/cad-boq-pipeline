@@ -160,7 +160,21 @@ def main(argv=None):
 
     # ── Step 1: 识图(多视图走 merge_views 合并) ──
     if '识图' in steps:
-        if len(drawings) > 1:
+        # v6.10: 光栅输入通道 — PDF/图片(甲方常见交付形态)直接进流程, 无几何证据如实标记
+        import raster_input as _raster
+        if len(drawings) == 1 and drawing and _raster.is_raster_or_pdf(drawing):
+            pid, err, extra = _raster.build_pid(drawing, output_dir)
+            if err:
+                print(f'  ✗ 光栅输入失败: {err}')
+                return
+            rp = os.path.join(output_dir, '识图结果.json')
+            with open(rp, 'w', encoding='utf-8') as f:
+                json.dump(pid, f, ensure_ascii=False, indent=2)
+            print(f"  光栅输入: 工程类型={pid.get('专业类型') or '未识别'} "
+                  f"(无几何证据 — 工程量需人工量取或索取 DWG/DXF)")
+            if extra.get('页图'):
+                print(f"  PDF 页图: {len(extra['页图'])} 张")
+        elif len(drawings) > 1:
             # v5.14: 多视图合并移入 merge_views.merge_drawing_files(CLI 独立可测)
             try:
                 from merge_views import merge_drawing_files

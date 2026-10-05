@@ -137,7 +137,7 @@ def _draw_entities(ax, entities, color, frame_layer=False):
             continue
 
 
-def _finalize_fig(fig, ax, bbox, title, path):
+def _finalize_fig(fig, ax, bbox, title, path, dpi=150):
     if bbox:
         x0, y0, x1, y1 = bbox
         pad = max((x1 - x0), (y1 - y0)) * 0.02 or 1.0
@@ -147,7 +147,7 @@ def _finalize_fig(fig, ax, bbox, title, path):
     ax.set_title(title, fontsize=8)
     ax.axis('off')
     fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
+    fig.savefig(path, dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -199,16 +199,184 @@ def render_dxf(dxf_path, out_dir=None, per_layer=True):
     return meta
 
 
+def _entity_anchor(ent):
+    """实体代表点(切块时快速过滤用)。"""
+    k = ent[0]
+    try:
+        if k == 'line':
+            return ent[1]
+        if k in ('poly', 'arc', 'circle', 'text', 'insert'):
+            p = ent[1]
+            return p[0] if (k == 'poly' and p) else p
+    except Exception:
+        return None
+    return None
+
+
+def _tiles_from_density(points, cols, rows, overlap=0.08):
+    """按实体分布分位切块(v6.10 实测驱动): 机械等面积切块在真实图上会让多块落在空白区
+    (船体大楼 3x3 实测: r2c3 有 7223 实体而 5/9 块为 0)。改按实体坐标等频分位定切分线,
+    使每块包含大致相同的实体数 → 每块都有实质内容, 视觉调用不浪费。
+    """
+    xs = sorted(p[0] for p in points)
+    ys = sorted(p[1] for p in points)
+    n = len(xs)
+    if n < 4:
+        return None
+
+    def q(arr, k, total):
+        i = min(int(len(arr) * k / total), len(arr) - 1)
+        return arr[i]
+
+    xb, yb = [xs[0]], [ys[0]]
+    for k in range(1, cols):
+        v = q(xs, k, cols)
+        if v > xb[-1]:
+            xb.append(v)
+    xb.append(xs[-1])
+    for k in range(1, rows):
+        v = q(ys, k, rows)
+        if v > yb[-1]:
+            yb.append(v)
+    yb.append(ys[-1])
+    if len(xb) < 2 or len(yb) < 2:
+        return None
+    tiles = []
+    for r in range(len(yb) - 1):
+        for c in range(len(xb) - 1):
+            tx0, tx1 = xb[c], xb[c + 1]
+            ty0, ty1 = yb[r], yb[r + 1]
+            ox, oy = (tx1 - tx0) * overlap, (ty1 - ty0) * overlap
+            tiles.append((f'r{r + 1}c{c + 1}', (tx0 - ox, ty0 - oy, tx1 + ox, ty1 + oy)))
+    return tiles
+
+
+def _tiles_from_grid(bbox, cols, rows, overlap=0.08):
+    """按网格把 bbox 切成 cols×rows 块(带 overlap 扩展, 防边界构件被切半丢失)。"""
+    x0, y0, x1, y1 = bbox
+    w, h = (x1 - x0) or 1.0, (y1 - y0) or 1.0
+    cw, ch = w / cols, h / rows
+    ox, oy = cw * overlap, ch * overlap
+    tiles = []
+    for r in range(rows):
+        for c in range(cols):
+            bx0 = x0 + c * cw
+            by0 = y0 + r * ch
+            tiles.append((f'r{r + 1}c{c + 1}',
+                          (max(bx0 - ox, x0), max(by0 - oy, y0),
+                           min(bx0 + cw + ox, x1), min(by0 + ch + oy, y1))))
+    return tiles
+
+
+def render_tiles(dxf_path, out_dir=None, grid=(3, 3), tiles=None, dpi=300,
+                 overlap=0.08, max_long_inch=10.0, density_aware=True):
+    """切块渲染 — v6.10 视觉精度突破(核心): 大图按块以高 dpi 分别渲染。
+
+    动机: 整图渲染(14×10in @150dpi ≈ 2100×1500px)对 A0/A1 施工图意味着 1px≈40mm 实物,
+    小符号(门窗号/索引/规格标注)不足 1px 必然漏检。
+    做法: 图纸按网格(或显式语义块, 如轴线分区)切块, 每块单独渲染并提高 dpi,
+    块内文字/符号的相对像素尺寸成倍放大 → 视觉可读性实质提升。
+
+    参数:
+      grid=(cols, rows) 机械网格; tiles=[(x0,y0,x1,y1) | (name,(x0,y0,x1,y1))] 显式块(优先)
+      dpi 每块渲染分辨率(默认 300, 整图 150)
+      overlap 块间重叠比例(默认 0.08, 防边界构件被切半)
+
+    返回 meta: tiles=[{name, file, bbox}], 其中 bbox 为图纸坐标系范围(供坐标反算合并)。
+    """
+    import ezdxf
+    if out_dir is None:
+        out_dir = os.path.join(os.path.dirname(dxf_path), 'renders')
+    os.makedirs(out_dir, exist_ok=True)
+
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    layers, bbox = _collect_entities(msp)
+    base = os.path.splitext(os.path.basename(dxf_path))[0]
+
+    if not bbox:
+        return {'source': dxf_path, 'base': base, 'bbox': None, 'tiles': [],
+                'note': '无可渲染实体, 切块为空'}
+
+    # 预取实体代表点(避免每块全量遍历; 密度切块也要用)
+    ents_pts = []
+    for lay, ents in layers.items():
+        for e in ents:
+            ents_pts.append((lay, e, _entity_anchor(e)))
+    pts = [p for _, _, p in ents_pts if p]
+
+    # 块清单: 显式 tiles > 密度自适应 > 机械网格
+    if tiles:
+        spec = []
+        for t in tiles:
+            if isinstance(t, (list, tuple)) and len(t) == 2 and isinstance(t[0], str):
+                spec.append((t[0], tuple(t[1])))
+            else:
+                spec.append((f't{len(spec) + 1}', tuple(t)))
+        mode = 'explicit'
+    else:
+        spec = (_tiles_from_density(pts, grid[0], grid[1], overlap) if density_aware else None)
+        mode = 'density' if spec else 'grid'
+        if not spec:
+            spec = _tiles_from_grid(bbox, grid[0], grid[1], overlap)
+
+    meta = {'source': dxf_path, 'base': base, 'bbox': bbox, 'dpi': dpi,
+            'grid': list(grid) if not tiles else None, 'overlap': overlap,
+            'tile_mode': mode, 'tile_count': len(spec), 'tiles': []}
+
+    for name, tb in spec:
+        tx0, ty0, tx1, ty1 = tb
+        bw, bh = (tx1 - tx0) or 1.0, (ty1 - ty0) or 1.0
+        if bw >= bh:
+            figsize = (max_long_inch, max(max_long_inch * bh / bw, 1.5))
+        else:
+            figsize = (max(max_long_inch * bw / bh, 1.5), max_long_inch)
+        fig, ax = plt.subplots(figsize=figsize)
+        drawn = 0
+        for idx, (lay, ents) in enumerate(sorted(layers.items())):
+            sel = []
+            for lay2, e, pt in ents_pts:
+                if lay2 != lay:
+                    continue
+                if pt is None or (tx0 <= pt[0] <= tx1 and ty0 <= pt[1] <= ty1):
+                    sel.append(e)
+            if sel:
+                _draw_entities(ax, sel, _layer_color(lay, idx), frame_layer=_is_frame_layer(lay))
+                drawn += len(sel)
+        p = os.path.join(out_dir, f'{base}_tile_{name}.png')
+        # v6.10: 切块图不画标题 — 实测模型会把渲染标题("船体大楼 / 分块 r1c1")当图纸内容读出,
+        # 污染识别结果(假文字)。整图保留标题(便于人工核对), 切块图保持画面纯净。
+        _finalize_fig(fig, ax, tb, '', p, dpi=dpi)
+        meta['tiles'].append({'name': name, 'file': p, 'bbox': list(tb), 'entities': drawn})
+
+    meta_path = os.path.join(out_dir, f'{base}_tiles_meta.json')
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return meta
+
+
 def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(description='DXF 渲染层(V-0)')
     ap.add_argument('dxf', help='DXF 文件路径')
     ap.add_argument('--out-dir', default=None, help='输出目录(默认 图纸旁/renders)')
     ap.add_argument('--no-per-layer', action='store_true', help='不生成分层图')
+    ap.add_argument('--tiles', default=None, help='切块渲染: 网格 cols x rows(如 3x3); 与整图并行输出')
+    ap.add_argument('--tile-dpi', type=int, default=300, help='切块渲染 dpi(默认 300, 整图为 150)')
     args = ap.parse_args(argv)
     meta = render_dxf(args.dxf, args.out_dir, per_layer=not args.no_per_layer)
     print(f'渲染完成: {meta["base"]}_plan.png')
     print(f'  图层数: {meta["layer_count"]} | 整图: {meta["files"]["full"]}')
+    if args.tiles:
+        try:
+            cols, rows = (int(x) for x in args.tiles.lower().split('x'))
+        except Exception:
+            print(f'  --tiles 格式错误: {args.tiles} (应为 3x3)')
+            return meta
+        tm = render_tiles(args.dxf, args.out_dir, grid=(cols, rows), dpi=args.tile_dpi)
+        print(f'  切块: {tm["tile_count"]} 块 @ {tm["dpi"]}dpi → {os.path.join(args.out_dir or os.path.join(os.path.dirname(args.dxf), "renders"))}')
+        for t in tm.get('tiles', [])[:8]:
+            print(f'    {t["name"]}: {os.path.basename(t["file"])} 实体 {t["entities"]}')
     print(f'  元数据: {os.path.join(args.out_dir or os.path.dirname(args.dxf) + "/renders", meta["base"] + "_render_meta.json")}')
     return meta
 

@@ -273,6 +273,120 @@ def second_look(pid, png_path, vision_result, verdict):
     }
 
 
+def _tiled_enabled(dxf_file=None):
+    """多尺度(分块)视觉开关 — v6.10。
+
+    VISION_TILED=1 强制开; =auto 按图纸像素密度自动判定(整图 1px 对应图纸跨度超阈值才分块,
+    避免小图上白花 ~10 倍 token); 默认关(分块耗时/token 成本高)。
+    可配 VISION_TILES_GRID / VISION_TILES_WORKERS / VISION_TILE_MM_PER_PX。
+    """
+    v = os.environ.get('VISION_TILED', '0').strip().lower()
+    if v in ('1', 'true', 'yes'):
+        return True
+    if v == 'auto':
+        if not dxf_file:
+            return False
+        try:
+            from vision_tiles import tiling_recommended
+            ok, mmpp, th = tiling_recommended(dxf_file)
+            if mmpp is not None:
+                print(f'  [分块判定] 整图渲染 1px≈{mmpp} 图纸单位(阈值 {th}) → '
+                      f'{"建议分块(小字必然漏检)" if ok else "整图已足够, 跳过分块"}')
+            return bool(ok)
+        except Exception as e:
+            print(f'  [分块判定] 失败, 跳过分块: {e}')
+            return False
+    return False
+
+
+_WIN_CODE_RE = None
+
+
+_CODE_CONFUSION = (('O', '0'), ('o', '0'), ('I', '1'), ('l', '1'),
+                   ('S', '5'), ('s', '5'), ('B', '8'), ('b', '8'))
+_CODE_CONF_CHARS = 'OoIlSsBb'
+
+
+def _fix_code_confusion(prefix, digits):
+    """修正视觉 OCR 常见字形混淆(v6.10 实测: MO921 实为 M0921, LCl515 实为 LC1515)。
+
+    规则: 前缀末尾若是数字误读字符(O/o/I/l/S/s/B/b) → 移入数字区再统一替换为 0/1/5/8;
+    数字区同样替换。保守处理: 仅当 前缀长度≥2 时移植前缀末字符(门窗编号前缀 LC/MC/M/C/TC
+    皆不以这些字符结尾, 故不会误伤真前缀)。
+    """
+    if len(prefix) > 1 and prefix[-1] in _CODE_CONF_CHARS:
+        digits = prefix[-1] + digits
+        prefix = prefix[:-1]
+    prefix = prefix.upper()
+    for ch, rep in _CODE_CONFUSION:
+        digits = digits.replace(ch, rep)
+    return prefix, digits
+
+
+def _extract_window_codes(text_items):
+    """从分块视觉文字里提取门窗编号(LC-1818 / M0921 / C1515 形态)。
+
+    实测(船体大楼 61 条文字)中门窗编号是价值最高的产出 —— 大修门窗量口径依赖它。
+    过滤规则: 字母1~3位 + 可选连字符 + 3~4位数字; 排除比例尺(含:)、做法编号(数字开头)。
+    """
+    import re as _re
+    seen = {}
+    for it in text_items or []:
+        t = (it.get('文本') if isinstance(it, dict) else str(it)) or ''
+        weight = it.get('观测次数', 1) if isinstance(it, dict) else 1
+        for m in _re.finditer(r'\b([A-Za-z]{1,3})[-]?([0-9OoIlSsBb]{3,4})\b', t):
+            if ':' in t or 'GB' in t.upper():
+                continue
+            prefix, digits = _fix_code_confusion(m.group(1), m.group(2))
+            code = f'{prefix}{digits}'
+            seen[code] = seen.get(code, 0) + weight
+    # 观测数≥2 的保留(单次观测可能是误读), 或总量<5 时全保留
+    codes = {k: v for k, v in seen.items() if v >= 2} or seen
+    return dict(sorted(codes.items(), key=lambda kv: -kv[1]))
+
+
+def attach_tiled_details(pid, tiled):
+    """把分块视觉细部写入 pid['视觉细部'] — 独立字段, **不覆盖任何几何量**(v6.5 纪律)。
+
+    多尺度思路: 整图识别定框架(工程类型/区域/规模), 分块识别补细节(门窗编号/规格文字)。
+    细节只作"视觉识别"信号: 与几何冲突时标待核, 由人工/后续规则裁决。
+    """
+    if not tiled or not tiled.get('文字'):
+        return None
+    texts = tiled.get('文字') or []
+    st = tiled.get('统计') or {}
+    detail = {
+        '来源': '分块视觉识别',
+        '切块': tiled.get('切块'),
+        '后端': tiled.get('后端'),
+        '文字数': len(texts),
+        '文字': texts[:200],
+        '构件计数': tiled.get('构件计数', {}),
+        '统计': st,
+        '待核提示': [],
+    }
+    codes = _extract_window_codes(texts)
+    if codes:
+        detail['门窗编号'] = codes
+        # 与几何门窗交叉(几何侧门窗表/门窗分项数量) — 不一致只提示不覆盖
+        geo_win = pid.get('门窗表') or pid.get('门窗') or []
+        try:
+            geo_cnt = len(geo_win) if not isinstance(geo_win, dict) else len(geo_win.get('门窗', []))
+        except Exception:
+            geo_cnt = 0
+        if geo_cnt and len(codes) != geo_cnt:
+            detail['待核提示'].append(
+                f"分块视觉识出门窗编号 {len(codes)} 类({list(codes)[:6]}), 几何门窗 {geo_cnt} 条 — "
+                f'口径需人工确认(视觉不覆盖几何)')
+        else:
+            detail['待核提示'].append(
+                f"分块视觉识出门窗编号 {len(codes)} 类: {list(codes)[:8]} — 供门窗量口径核对")
+    if st.get('解析失败块'):
+        detail['待核提示'].append(f"分块识别有 {st['解析失败块']} 块 JSON 解析失败, 该块细节缺失")
+    pid['视觉细部'] = detail
+    return detail
+
+
 def run_vision_for_drawing(pid, dwg_file, output_dir):
     """识图流程内的视觉路径(渲染→识别→交叉验证→写入 pid)。
 
@@ -345,6 +459,26 @@ def run_vision_for_drawing(pid, dwg_file, output_dir):
             pid.setdefault('图纸问题候选', []).append(
                 f'[视觉交叉验证] {verdict.get("裁决", "视觉与几何识图不一致, 建议人工复核图面")}')
             print(f"  ⚠ 视觉交叉验证: {verdict.get('裁决')}")
+
+        # 6. v6.10 多尺度: 分块补细节(整图已定框架) — VISION_TILED=1 强制 / =auto 按像素密度判定
+        if _tiled_enabled(dwg_file):
+            try:
+                from vision_tiles import identify_tiles
+                grid_env = os.environ.get('VISION_TILES_GRID', '3x3')
+                cols, rows = (int(x) for x in grid_env.lower().split('x'))
+                tr = identify_tiles(
+                    dwg_file, out_dir=render_dir, grid=(cols, rows),
+                    workers=int(os.environ.get('VISION_TILES_WORKERS', '4')))
+                detail = attach_tiled_details(pid, tr)
+                if detail:
+                    codes = detail.get('门窗编号') or {}
+                    print(f"  视觉细部(分块): 文字 {detail.get('文字数', 0)} 条"
+                          + (f", 门窗编号 {len(codes)} 类" if codes else ''))
+                    for warn in detail.get('待核提示', []):
+                        print(f"    · {warn}")
+            except Exception as e:
+                print(f'  ⚠ 分块视觉失败(跳过, 几何结果不受影响): {e}')
+
         return verdict
     except Exception as e:
         print(f'  ⚠ 视觉路径异常(跳过, 几何结果不受影响): {e}')

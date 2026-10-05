@@ -166,12 +166,40 @@ def parse_tables(msp, unit_scale_mm=1.0):
     """主入口: 解析图纸中的所有文字表格
     v4.1.2: 支持同 y 区域多个表格(做法表+门窗表并存)
     v6.4: 先按 x 栏分区(多栏排版), 每栏独立聚类解析
+    v6.10: **优先消费真表格** — ACAD_TABLE 实体 + 匿名表块(*T INSERT + 块内文字网格);
+           结构化表格比文字聚类可靠, 二者并存(真表格在前), 消费方按 type 取用。
     """
+    tables = []
+    # ── v6.10: 真表格 / 匿名表块(结构化, 优先) ──
+    try:
+        from dxf_entities import extract_tables
+        for t in extract_tables(msp):
+            cells = t.get('cells') or []
+            if not cells or not t.get('cell_text_available'):
+                continue
+            headers = list(cells[0])
+            # 结构与既有约定对齐: rows 元素为 {'y','cells','grid'} — 下游 table_to_layers 按
+            # row['cells'] 取列(若给 list of list 会 'list' object has no attribute 'get')
+            data_rows = [{'y': None, 'cells': list(r), 'grid': {}} for r in cells[1:] if r]
+            if not data_rows:
+                continue
+            tables.append({
+                'type': detect_table_type(headers) or 'CAD表格',
+                'source': t.get('kind', 'ACAD_TABLE'),
+                'headers': headers,
+                'header_row': 0,
+                'rows': data_rows,
+                'y_range': None,
+                'x_range': None,
+                'layer': t.get('layer', ''),
+            })
+    except Exception:
+        pass
+
     texts = collect_texts(msp, unit_scale_mm)
     if len(texts) < 4:
-        return []
+        return tables
 
-    tables = []
     for texts_col in split_text_columns(texts):
         tables.extend(_parse_tables_in_column(texts_col))
     return tables
