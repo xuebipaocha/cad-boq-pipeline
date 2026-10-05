@@ -38,6 +38,30 @@ NATURE_WORDS = ('改造', '大修', '翻新', '修缮', '改建', '扩建', '拆
 NEW_BUILD_KEYWORDS = {'新建': 3, '首建': 2, '施工图': 1}
 
 
+# v6.10.6 路径4 大图性能: 同一图纸在一次流程内**只读一次**。
+# cProfile 实测(新图 000008, 26279 实体): 全程 278.6s 中 readfile 占 140.5s —— 被重复读取
+# **8 次** × 17.5s/次(面积裁决/房间/表格/扩展实体/标注关联各读一遍)。改为进程级缓存后,
+# 大图可省约 2 分钟。流程对文档只读(不修改), 故缓存安全。
+import os as _os_perf
+import ezdxf as _ezdxf_perf
+
+_ORIG_READFILE = _ezdxf_perf.readfile
+_READFILE_CACHE = {}
+
+
+def _cached_readfile(filename, *args, **kwargs):
+    try:
+        key = _os_perf.path.abspath(str(filename))
+    except Exception:
+        return _ORIG_READFILE(filename, *args, **kwargs)
+    if key not in _READFILE_CACHE:
+        _READFILE_CACHE[key] = _ORIG_READFILE(filename, *args, **kwargs)
+    return _READFILE_CACHE[key]
+
+
+_ezdxf_perf.readfile = _cached_readfile
+
+
 def _detect_rooms_pid(dwg_file):
     """v6.1: 房间分区几何化 — 闭合区域→房间列表(面积/周长)。失败返回 []。"""
     try:
@@ -186,6 +210,10 @@ def normalize_nature(v):
 
 def detect_specialty_detail(layers, texts):
     hay = (' '.join(layers) + ' ' + ' '.join(texts)).lower()
+    # v6.10.6 fx1 图名优先: 图名(如"一层给排水及消防平面布置图")是专业最强信号, 但被数千条
+    # 说明文字稀释 —— 房建词表含 建筑/结构/柱/梁/板 等**通用词**, 在任何图的说明里都反复出现,
+    # 导致给排水图被判"房屋建筑与装饰工程"(实测新图 000006: 0.433)。故命中图名的专业词权重 ×3。
+    title_hay = ' '.join(t for t in texts if t and '图' in t and 3 <= len(t) <= 30).lower()
     scores = {}
     for sp, kws in SPECIALTY_KEYWORDS.items():
         score = 0
@@ -193,6 +221,8 @@ def detect_specialty_detail(layers, texts):
         for kw, w in kws.items():
             if kw.lower() in hay:
                 score += w; hits.append(kw)
+            if kw.lower() in title_hay:
+                score += w * 3; hits.append(kw + '(图名)')
         scores[sp] = {'score': score, 'hits': hits}
     ranked = sorted(scores.items(), key=lambda x: x[1]['score'], reverse=True)
     best, info = ranked[0]
@@ -320,6 +350,29 @@ def choose_area(result, insunits=4):
     if text_area > 0 and text_area >= poly_best and poly_best > 0 and text_area >= 2 * poly_best:
         area, source = text_area, '文字面积标注(图签权威)'
         notes.append(f'图签面积({text_area:.0f}m²)大于闭合轮廓({poly_best:.0f}m²), 采用图签值')
+    # v6.10.6 ②多图幅混排并算: 一份图纸常含多张平面(一层/二层/三层), 面积应为**各层之和**,
+    # 而原逻辑取"最大单个闭合区域" → 实测 40/51.4/66.3/77.4/47m² 明显偏小。
+    # 判据: 候选面积降序, 与最大值同量级(≥1/3)者视为同图多图幅; 该类簇之和显著大于单个
+    # 区域(>1.5 倍)时采用之和。只有一个主导区域时不动 —— 避免把一张小详图当"楼层"叠加。
+    try:
+        _cand = sorted([p.get('area_m2', 0) for p in poly_areas if (p.get('area_m2') or 0) > 1],
+                       reverse=True)
+        if len(_cand) >= 2:
+            _top = _cand[0]
+            _cluster = [a for a in _cand if a >= _top / 3.0]
+            # v6.10.6 收紧: 需 **≥3 个**同量级区域才判多图幅 —— 只有 2 个时更可能是
+            # "主区域 + 附属区域(楼梯/雨棚)", 求和会把单层图算成双层(基准用例板/墙 err=100% 回归)。
+            # v6.10.6 收紧为**默认关闭、按需开启**（AREA_MULTI_VIEW=1）:
+            # 自动判断在基准用例上仍误触发（房建B 板/墙 err=117% → 面积被并算成 2.17 倍）。
+            # 同图是否多图幅凭几何无法可靠判定 → 交人工/环境变量决定, 不默认改变面积口径。
+            if (os.environ.get('AREA_MULTI_VIEW', '0') == '1' and len(_cluster) >= 3):
+                _sum_a = sum(_cluster)
+                if area and _sum_a > area * 1.5:
+                    notes.append(f'多图幅并算: {len(_cluster)} 个同量级区域之和 {_sum_a:.1f}m² '
+                                 f'(单区域最大 {area:.1f}m²) — 疑同图含多张平面/分区')
+                    area, source = round(_sum_a, 2), '多图幅区域求和'
+    except Exception:
+        pass
     # v6.10.5: 多图幅混排 → 面积存疑(4 份真实图实测: 基础图 40m² / 办公楼 51m² / 外立面图 66m²
     # 明显失真 —— 根因是"最大闭合多段线"在多图幅/详图混排图纸上取到的不是主平面)。
     # 判据: 采用值偏小(<200m²) 且图内存在 ≥3 个同量级(≥其 30%)闭合区域 → 判多图幅混排, 面积待核。
@@ -438,6 +491,22 @@ def run(dwg_file, output_dir):
                             _txt = ' '.join(str(c) for c in (_cells or []) if c).strip()
                             if len(_txt) >= 6:
                                 table_desc_rows.append(_txt[:140])
+                                # v6.10.6 未修项落地: 描述文字 → 构造层反推(材料/厚度)
+                                # 让描述型做法表也能参与算量; 去重后并入 construction_layers,
+                                # 并标来源"做法说明文字反推"(可审计, 不是凭空构造层)
+                                import re as _re
+                                _mats = [m for m in ('无机涂料', '乳胶漆', '腻子', '自流平', '木地板',
+                                                     '地砖', '石材', '防水', '砂浆', '混凝土', '面砖',
+                                                     '踢脚', '吊顶', '保温', '涂料') if m in _txt]
+                                if _mats:
+                                    _th = _re.search(r'(\d+)\s*(?:mm\s*厚|厚)|厚\s*(\d+)', _txt)
+                                    _thv = int(_th.group(1) or _th.group(2)) if _th else None
+                                    _mat = '、'.join(_mats[:2])
+                                    if not any(l.get('材料') == _mat and l.get('厚度_mm') == _thv
+                                               for l in construction_layers):
+                                        construction_layers.append({
+                                            '名称': _txt[:24], '材料': _mat,
+                                            '厚度_mm': _thv, '来源': '做法说明文字反推'})
                     if layers_from_table:
                         # v6.6: 多张做法表逐张累加(真实图纸含 1+25+9+4+3+2 共6张做法表,
                         # 原逻辑后表覆盖前表, 44 层构造层最后只剩 2 层 — 算量厚度/材料大面积丢失)
@@ -597,6 +666,29 @@ def run(dwg_file, output_dir):
         '构件尺寸推导': member_sizes if 'member_sizes' in dir() else {},
         '剖面算量': section_qty if 'section_qty' in dir() else [],
     }
+
+    # v6.10.6 fx2 图例表 → 符号映射: 给排水/电气图的核心信息(W1=生活给水管道、RJ=热水给水管道、
+    # 地漏、大便器水箱、淋浴喷头、闸阀…), 此前被解析成"设备表"后**整段丢弃** —— 现提取
+    # 符号↔名称 对写入 pid['图例'], 作为安装专业(管道/器具)算量的入口, 也供专业判据复用。
+    try:
+        _legend = {}
+        for _tb in (pid.get('表格') or []):
+            _h = ' '.join(str(x) for x in (_tb.get('headers') or []))
+            _body = str(_tb.get('rows') or '')[:600]
+            if ('图例' in _h) or ('图例' in _body and '名称' in (_h + _body)):
+                for _r in (_tb.get('rows') or []):
+                    _cs = [str(c).strip() for c in
+                           ((_r.get('cells') if isinstance(_r, dict) else _r) or [])
+                           if str(c).strip()]
+                    for _i in range(0, len(_cs) - 1, 2):
+                        _sym, _nm = _cs[_i], _cs[_i + 1]
+                        if 1 <= len(_sym) <= 8 and 2 <= len(_nm) <= 40 and _sym not in _legend:
+                            _legend[_sym] = _nm
+        if _legend:
+            pid['图例'] = _legend
+            print(f'  图例表: {len(_legend)} 项 (如 {list(_legend.items())[:3]})')
+    except Exception as _e:
+        print(f'  ⚠ 图例表解析失败(跳过): {_e}')
 
     # v6.10: 扩展实体解析(多线墙/样条/填充/引线/真表格/天正专业对象) — 此前全项目零处理
     try:
@@ -805,6 +897,37 @@ def run(dwg_file, output_dir):
     try:
         from vision_fusion import run_vision_for_drawing
         run_vision_for_drawing(pid, dwg_file, output_dir)
+        # v6.10.6 路径1 视觉语义接入: 几何房间识别为 0 时, 用视觉读出的房间/部位名补位。
+        # 此前视觉结论仅用于专业类型质检(读完即丢), 换画法/换图层命名即失效 —— 这是
+        # "视觉看懂了但算量用不上"的根因; 补位项标来源'视觉识别(补位)', 不放尺寸(不编造面积)。
+        try:
+            # v6.10.6: 改为**合并去重** —— 原"几何房间为空才补"会被 HATCH 回退的假房间
+            # （图层名如"地面填充"/"防水填充"）挡住, 视觉读到的真实房间名被白丢。
+            if True:
+                vis = pid.get('视觉识别') or {}
+                POS = ('卫生间', '办公室', '会议室', '走廊', '楼梯间', '厨房', '淋浴间',
+                       '储藏', '设备间', '门厅', '阳台', '内墙', '外墙', '楼面', '顶棚')
+                cands = list(vis.get('房间部位') or []) + list(vis.get('可见文字') or [])
+                for t in ((pid.get('视觉细部') or {}).get('文字') or [])[:40]:
+                    cands.append(t if isinstance(t, str) else str(t.get('文本', '')))
+                rooms, seen = [], set()
+                for c in cands:
+                    s = str(c)
+                    for p in POS:
+                        if p in s and p not in seen:
+                            seen.add(p)
+                            rooms.append({'房间名': p, '面积_m2': None,
+                                          '来源': '视觉识别(补位)'})
+                _have = {str(r.get('房间名') or '') for r in (pid.get('房间') or [])}
+                rooms = [r for r in rooms if r['房间名'] not in _have]
+                if rooms:
+                    pid['房间'] = list(pid.get('房间') or []) + rooms
+                    print(f"  房间(视觉补位): +{len(rooms)} 个 "
+                          f"({', '.join(r['房间名'] for r in rooms[:6])})")
+                else:
+                    print('  房间(视觉补位): 视觉未读出房间/部位名')
+        except Exception as e:
+            print(f'  ⚠ 视觉房间补位失败: {e}')
     except Exception as e:
         print(f'  ⚠ 视觉路径接入异常(跳过): {e}')
 

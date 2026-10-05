@@ -182,7 +182,14 @@ def extract_pipe_lengths(doc, msp, insunits=4):
                   # v4.2: 工程前缀图层 W-/S-/XH- 等
                   'W-JS': '给水', 'W-PS': '排水', 'W-WS': '污水', 'W-XH': '消火', 'W-Y': '雨水',
                   'S-SP': '喷淋', 'S-HY': '消火', 'S-XF': '消防', 'SUPPLY': '给水', 'SEWER': '排水',
-                  'WATER': '给水'}
+                  'WATER': '给水',
+                  # v6.10.6 ③: 暖通/通风图层（实测新图 000005 是供暖+排风图, 图层如
+                  # PIPE-暖供水 / VPIPE-暖回水 / VALVE-暖供支管 / DUCT-排风管 —— 原表无"暖/风"
+                  # 类词, 全部落到"未知系统_未标管径" → 清单匹配率仅 0.25）
+                  '暖供': '采暖供水', '暖回': '采暖回水', '暖支': '采暖支管', '供支管': '采暖供水',
+                  'VPIPE': '采暖', '暖': '采暖', '供热': '采暖',
+                  '排风': '通风', '送风': '通风', '新风': '通风', 'DUCT': '通风', '风管': '通风'}
+    _VALVE_LAYERS = ('VALVE', '阀')  # 阀门层(不计入管道长度, 单独按个数)
     pipes_by_diameter = {}
     for lay, info in pipes_by_layer.items():
         m = diameter_pattern.search(lay)

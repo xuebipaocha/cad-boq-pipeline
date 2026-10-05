@@ -137,7 +137,23 @@ def _draw_entities(ax, entities, color, frame_layer=False):
             continue
 
 
-def _finalize_fig(fig, ax, bbox, title, path, dpi=150):
+def _finalize_fig(fig, ax, bbox, title, path, dpi=None):
+    # v6.10.6: 渲染 dpi 可配（VISION_RENDER_DPI，默认 150）—— 实测整图 150dpi
+    # 在 A0/A1 图上 1px≈数十~数百图纸单位, 小字必然漏检; 提高 dpi 可改善文字召回。
+    if dpi is None:
+        dpi = int(os.environ.get('VISION_RENDER_DPI', '150'))
+    # v6.10.6 建议2 像素上限保护: 实测整图 dpi 300(4200×3000px) 时视觉识别**直接归零**
+    # —— 多模态 API 服务端会压缩超大图, 反而丢细节。故按最长边上限反推 dpi,
+    # 防止"调高 dpi"退化为"什么都读不出"(默认上限 2400px, VISION_RENDER_MAX_PX 可调)。
+    try:
+        _max_px = int(os.environ.get('VISION_RENDER_MAX_PX', '2400'))
+        if _max_px > 0:
+            _w, _h = fig.get_size_inches()
+            _need = max(_w, _h) * dpi
+            if _need > _max_px:
+                dpi = max(72, int(dpi * _max_px / _need))
+    except Exception:
+        pass  # v6.10.6: 像素钳制失败不阻断出图(教训: 缺 except 曾致 SyntaxError → 视觉路径全失效)
     if bbox:
         x0, y0, x1, y1 = bbox
         pad = max((x1 - x0), (y1 - y0)) * 0.02 or 1.0
@@ -268,8 +284,10 @@ def _tiles_from_grid(bbox, cols, rows, overlap=0.08):
     return tiles
 
 
-def render_tiles(dxf_path, out_dir=None, grid=(3, 3), tiles=None, dpi=300,
+def render_tiles(dxf_path, out_dir=None, grid=(3, 3), tiles=None, dpi=None,
                  overlap=0.08, max_long_inch=10.0, density_aware=True):
+    if dpi is None:  # v6.10.6: VISION_TILE_DPI 可配（默认 300）
+        dpi = int(os.environ.get('VISION_TILE_DPI', '300'))
     """切块渲染 — v6.10 视觉精度突破(核心): 大图按块以高 dpi 分别渲染。
 
     动机: 整图渲染(14×10in @150dpi ≈ 2100×1500px)对 A0/A1 施工图意味着 1px≈40mm 实物,

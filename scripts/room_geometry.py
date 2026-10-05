@@ -18,7 +18,13 @@ sys.stdout.reconfigure(encoding='utf-8')
 ROOM_KEYWORDS = ['客厅', '卧室', '卫生间', '厨房', '餐厅', '书房', '会议室', '办公室',
                  '阳台', '走廊', '过道', '门厅', '储藏', '衣帽间', '主卧', '次卧', '儿童房',
                  '浴室', '洗手间', '休息室', '接待室', '机房', '库房', '卫生间', '淋浴间',
-                 '楼梯间', '楼梯']
+                 '楼梯间', '楼梯',
+                 # v6.10.6 路径2 去图层依赖: 真实图纸常用标准英文图层名(实测新图 000006:
+                 # LVTRY 卫生间 / STAIR 楼梯), 中文关键词表对英文层完全失配 → 房间 0。
+                 # 只补名称维度, 不改几何判定与置信度语义。
+                 'LVTRY', 'lvtry', 'WC', 'wc', 'TOILET', 'toilet', 'BATH', 'bath',
+                 'STAIR', 'stair', 'KITCHEN', 'kitchen', 'OFFICE', 'office',
+                 'MEETING', 'meeting', 'ROOM', 'room', 'LOBBY', 'lobby', 'BALCONY', 'balcony']
 # 排除非房间层
 EXCLUDE_LAYERS = ['图框', '0', '墙体', '墙', '轴线', '标注', '尺寸', '门窗', '柱', '梁']
 
@@ -160,6 +166,28 @@ def detect_rooms(dxf_path, scale=1.0):
                       '数量': info.get('数量', 1),
                       '来源': '图层' if any(k in name for k in ROOM_KEYWORDS) else '标签',
                       '置信度': 0.9})
+    # v6.10.6 路径2 去图层依赖: 上述规则(只认 LWPOLYLINE + 图层名含房间关键词 + 0层大区域排除)
+    # 在真实图上会整体落空 → 房间 0(新图 000006 实测)。此处回退到 **HATCH 填充边界**(仍是几何):
+    # 大面积填充(≥5m²)即实质区域候选; 房间名取图层名兜底, 空名则由视觉补位(路径1)命名。
+    # 只放宽候选来源, 不改置信度语义 —— 回退项置信度 0.5, 来源标明可审计。
+    if not rooms:
+        try:
+            import ezdxf as _ex
+            import dxf_entities as _de
+            _doc = _ex.readfile(dxf_path)
+            _seen = set()
+            for _h in _de.extract_hatch(_doc.modelspace()):
+                _a = (_h.get('area') or 0) / 1e6
+                if _a < 5.0:
+                    continue
+                _key = round(_a, 1)
+                if _key in _seen:
+                    continue
+                _seen.add(_key)
+                rooms.append({'房间名': (_h.get('layer') or '').strip(), '面积_m2': round(_a, 2),
+                              '周长_m': None, '数量': 1, '来源': 'HATCH 填充区域', '置信度': 0.5})
+        except Exception:
+            pass
     return rooms
 
 

@@ -183,6 +183,10 @@ def attach_vision(pid, vision_result):
             '构件计数': vision_result.get('构件计数', {}),
             '模型': meta.get('模型'),
             '来源': '视觉识别',
+            # v6.10.6 路径1: 视觉语义接入算量 —— 此前只传工程类型(纯质检), 房间/部位/文字
+            # 全部丢弃, 导致"视觉看懂了但算量用不上"; 现透传供房间补位/构造层/特征编写消费
+            '房间部位': vision_result.get('房间部位') or [],
+            '可见文字': (vision_result.get('可见文字') or [])[:40],
         }
     pid['视觉验证'] = verdict
     # v5.15 构件计数交叉验证(视觉苗木块/设备符号 vs 几何苗木/设备类)
@@ -277,10 +281,13 @@ def _tiled_enabled(dxf_file=None):
     """多尺度(分块)视觉开关 — v6.10。
 
     VISION_TILED=1 强制开; =auto 按图纸像素密度自动判定(整图 1px 对应图纸跨度超阈值才分块,
-    避免小图上白花 ~10 倍 token); 默认关(分块耗时/token 成本高)。
+    避免小图上白花 ~10 倍 token); VISION_TILED=0 强制关。
+    **v6.10.6 fx4: 默认改为 auto** —— 实测新图 000006(给排水图, 1px≈数十图纸单位):
+    整图视觉只读出 0 条文字/0 个房间, 分块后读出 108 条文字、房间补位生效(0→4 个) →
+    密图必须默认分块, 否则视觉语义整条路径空转; 稀疏小图由 auto 判定不分块(不浪费 token)。
     可配 VISION_TILES_GRID / VISION_TILES_WORKERS / VISION_TILE_MM_PER_PX。
     """
-    v = os.environ.get('VISION_TILED', '0').strip().lower()
+    v = os.environ.get('VISION_TILED', 'auto').strip().lower()
     if v in ('1', 'true', 'yes'):
         return True
     if v == 'auto':
@@ -387,6 +394,37 @@ def attach_tiled_details(pid, tiled):
     return detail
 
 
+def _merge_vision_samples(acc, new):
+    """v6.10.6 ③多次采样治波动: 并集合并两次视觉结果。
+
+    实测同配置两次差异巨大（0~40 条文字 / 2~15 个房间）—— 视觉模型输出有随机性,
+    单次采样不可靠。合并策略: 文字/房间部位取**并集**(召回优先), 构件计数取**最大**
+    (宁可多算待核, 不可漏), 置信度取最大。
+    """
+    if not acc:
+        return new
+    if not new:
+        return acc
+    out = dict(acc)
+    for k in ('可见文字', '房间部位'):
+        seen, merged = set(), []
+        for x in list(acc.get(k) or []) + list(new.get(k) or []):
+            key = str(x)
+            if key not in seen:
+                seen.add(key)
+                merged.append(x)
+        out[k] = merged
+    ca, cb = acc.get('构件计数') or {}, new.get('构件计数') or {}
+    out['构件计数'] = {k: max(int(ca.get(k) or 0), int(cb.get(k) or 0))
+                       for k in set(ca) | set(cb)}
+    try:
+        out['工程类型置信度'] = max(float(acc.get('工程类型置信度') or 0),
+                                    float(new.get('工程类型置信度') or 0))
+    except Exception:
+        pass
+    return out
+
+
 def run_vision_for_drawing(pid, dwg_file, output_dir):
     """识图流程内的视觉路径(渲染→识别→交叉验证→写入 pid)。
 
@@ -406,7 +444,16 @@ def run_vision_for_drawing(pid, dwg_file, output_dir):
 
         # 2. 视觉识别: 强制启用(识图必经), 独立 try
         from vision_query import query_vision
-        result = query_vision(png, enable=True)
+        # v6.10.6 ③多次采样（VISION_SAMPLES, 默认 2）: 视觉输出随机性大, 单次不可靠 →
+        # 采样 N 次取并集(文字/房间部位)与最大值(构件计数)。N=1 时行为与原来一致。
+        _n_samp = max(1, int(os.environ.get('VISION_SAMPLES', '2')))
+        result = None
+        for _si in range(_n_samp):
+            _r = query_vision(png, enable=True)
+            result = _merge_vision_samples(result, _r) if _r else result
+        if _n_samp > 1 and result:
+            print(f'  视觉多次采样: {_n_samp} 次 → 文字 {len(result.get("可见文字") or [])} 条'
+                  f'/部位 {len(result.get("房间部位") or [])} 个')
         if not result:
             print('  ⚠ 视觉路径: 识别失败, 跳过交叉验证(几何结果不受影响)')
             return attach_vision(pid, None)
@@ -461,7 +508,16 @@ def run_vision_for_drawing(pid, dwg_file, output_dir):
             print(f"  ⚠ 视觉交叉验证: {verdict.get('裁决')}")
 
         # 6. v6.10 多尺度: 分块补细节(整图已定框架) — VISION_TILED=1 强制 / =auto 按像素密度判定
-        if _tiled_enabled(dwg_file):
+        # v6.10.6 整图优先（用户定策）: 整图已读出内容 → 不再分块（省约 5 倍耗时/token）;
+        # 整图读不出（密图/小字, 整图 0 条文字）才分块兜底。判据用整图**本次实际产出**
+        # 而非像素密度 —— 实测同配置多次结果波动大（0~40 条文字）, 密度阈值会误判。
+        _vr = pid.get('视觉识别') or {}
+        _n_txt = len(_vr.get('可见文字') or [])
+        _n_room = len(_vr.get('房间部位') or [])
+        if (os.environ.get('VISION_TILED', 'auto').strip().lower() == 'auto'
+                and (_n_txt >= 5 or _n_room >= 1)):
+            print(f'  [分块判定] 整图已读出 {_n_txt} 条文字/{_n_room} 个部位 → 整图优先, 跳过分块')
+        elif _tiled_enabled(dwg_file):
             try:
                 from vision_tiles import identify_tiles
                 grid_env = os.environ.get('VISION_TILES_GRID', '3x3')

@@ -158,6 +158,50 @@ def _merge_texts(observations, dist_thresh):
     return merged
 
 
+def _stitch_fragments(texts, bbox_diag):
+    """v6.10.6 建议1: 跨块文字拼接 —— 切块会把一个词切成碎片(如 "卫"+"生"+"间" 落在相邻块)。
+
+    实测: 5x5 分块文字 65→236 条, 房间却 12→2 —— 增量多是碎片, 关键词匹配拼不出词。
+    做法: 把长度 ≤2 的碎片按 (行, x) 排序, 同排且 x 间隔在一个字宽内则拼接;
+    拼接结果标来源 "跨块拼接" 便于审计; 被拼接消耗的碎片移除。
+    """
+    if not texts:
+        return texts
+    gap = max(float(bbox_diag or 0) * 0.004, 1.0)
+    frags_all = []
+    for _k, _t in enumerate(texts):
+        if not isinstance(_t, dict):
+            continue
+        _s = str(_t.get('文本', '') or '').strip()
+        if 1 <= len(_s) <= 2 and not _s.isdigit():
+            frags_all.append((_k, _s, float(_t.get('x') or 0), float(_t.get('y') or 0)))
+    if len(frags_all) < 2:
+        return texts
+    frags = sorted(frags_all, key=lambda r: (round(r[3] / gap), r[2]))
+    used, new_texts = set(), []
+    for i, (k, s, x, y) in enumerate(frags):
+        if k in used:
+            continue
+        used.add(k)
+        cur, cx, cy = s, x, y
+        for k2, s2, x2, y2 in frags[i + 1:]:
+            if k2 in used:
+                continue
+            if abs(y2 - cy) <= gap and 0 <= (x2 - cx) <= gap * 6:
+                cur += s2
+                used.add(k2)
+                cx = x2
+                if len(cur) >= 6:
+                    break
+        if len(cur) >= 2:
+            new_texts.append({'文本': cur, 'x': x, 'y': y, '来源': '跨块拼接'})
+    if not new_texts:
+        return texts
+    out = [t for _k, t in enumerate(texts) if _k not in used]
+    out.extend(new_texts)
+    return out
+
+
 def _merge_components(observations, dist_thresh):
     """构件合并去重: 同类型 + 图纸坐标邻近(重叠区同一构件被两块看到) → 聚类。"""
     clusters = []
@@ -328,6 +372,21 @@ def identify_tiles(dxf_path, backend=None, grid=(3, 3), tiles=None, dpi=300,
     dist_thresh = max(diag * 0.03, 100.0)
 
     merged_texts = _merge_texts(texts, dist_thresh)
+    # v6.10.6 建议1: 跨块碎片拼接 —— 切块把词切碎("卫"+"生"+"间"分落相邻块),
+    # 实测 5x5 分块文字 65→236 条但房间反而 12→2(增量多为碎片) → 拼回完整词后才可用。
+    try:
+        _xs = [float(t.get('x') or 0) for t in merged_texts if isinstance(t, dict)]
+        _ys = [float(t.get('y') or 0) for t in merged_texts if isinstance(t, dict)]
+        _diag = (((max(_xs) - min(_xs)) ** 2 + (max(_ys) - min(_ys)) ** 2) ** 0.5
+                 if (_xs and _ys) else 0)
+        _before = len(merged_texts)
+        merged_texts = _stitch_fragments(merged_texts, _diag)
+        _st = sum(1 for t in merged_texts
+                  if isinstance(t, dict) and t.get('来源') == '跨块拼接')
+        if _st:
+            print(f'  跨块拼接: {_before} → {len(merged_texts)} 条(拼回 {_st} 个词)')
+    except Exception as _e:
+        print(f'  ⚠ 跨块拼接失败(跳过): {_e}')
     merged_comps = _merge_components(comps, dist_thresh)
 
     counts = {}
