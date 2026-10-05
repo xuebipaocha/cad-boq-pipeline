@@ -12,11 +12,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 TOOLS_DIR = SKILL_DIR / "tools" / "oda"
 ODA_EXE = TOOLS_DIR / "ODAFileConverter.exe"
 
-# v6.10: 版本事实(实测 2026-08-19)
-#   本地部署: 21.5.15 (2021 年) | 代码此前期望: 27.1.16
-#   官方下载现状: ODA 已改为**需登录账号**(所有 MSI 直链 302 → sso.opendesign.com
-#   → account.opendesign.com/downloads), 因此无法自动下载安装 → 改为明确的手动指引。
-ODA_EXPECTED_VERSION = '27.1.16'
+# v6.10.1: ODA 现版(21.5.15)实测可用 —— 历史端到端 DWG→DXF 转换均通过, 故**直接使用现版, 不做升级**。
+# 官方 MSI 直链已改为需登录账号(302 → account.opendesign.com/downloads), 本模块不自动下载;
+# 仅当遇到"新版 DWG 转换失败"时, 才需到 ODA_DOWNLOAD_PAGE 手动获取更新版(见 _ensure_oda 提示)。
 ODA_DOWNLOAD_PAGE = 'https://www.opendesign.com/guestfiles/oda_file_converter'
 
 
@@ -46,7 +44,7 @@ def _oda_download_requires_login(timeout=20):
     import urllib.error
 
     url = (f'https://download.opendesign.com/guestfiles/oda_file_converter/'
-           f'ODAFileConverter_{ODA_EXPECTED_VERSION}.msi')
+           f'ODAFileConverter_{_local_oda_version() or "21.5.15"}.msi')
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -83,34 +81,15 @@ def _ensure_oda():
         shutil.copytree(src_dir, dst_dir)
         return True
 
-    local_v = _local_oda_version()
-    # v6.10: 官方下载需登录账号 → 直接给手动指引, 不浪费一次无用的下载尝试
-    if _oda_download_requires_login():
-        print('[ODA] 未找到 ODA File Converter, 且官方下载已需登录账号(实测 302 → account.opendesign.com/downloads)')
-        print(f'[ODA] 手动获取步骤: ① 打开 {ODA_DOWNLOAD_PAGE} 并登录/注册(免费)')
-        print(f'[ODA]              ② 下载 ODAFileConverter_{ODA_EXPECTED_VERSION}.msi')
-        print(f'[ODA]              ③ 解包到 {TOOLS_DIR} (msiexec /a <msi> /qn TARGETDIR=... 或 7-zip)')
-        print(f'[ODA] 本地版本: {local_v or "未部署"}; 期望 ≥ {ODA_EXPECTED_VERSION}'
-              f'(21.5 对新版 DWG 与部分天正导出支持有限)')
-        print('[ODA] 备用方案: 请设计方直接导出 DXF(零转换依赖, 最稳)')
-        return False
-
-    print("[ODA] 未找到 ODA File Converter，正在自动下载...")
-    try:
-        import urllib.request
-        os.makedirs(TOOLS_DIR, exist_ok=True)
-        url = ("https://download.opendesign.com/guestfiles/oda_file_converter/"
-               f"ODAFileConverter_{ODA_EXPECTED_VERSION}.msi")
-        msi_path = TOOLS_DIR / "ODAFileConverter.msi"
-        urllib.request.urlretrieve(url, msi_path)
-        subprocess.run(["msiexec", "/a", str(msi_path), "/qn", f"TARGETDIR={TOOLS_DIR.parent}"],
-                       capture_output=True)
-        print("[ODA] 安装完成")
-        return ODA_EXE.exists()
-    except Exception as e:
-        print(f"[ODA] 下载失败: {e}")
-        print(f"[ODA] 请手动下载安装: {ODA_DOWNLOAD_PAGE}")
-        return False
+    # v6.10.1: 官方 MSI 直链需登录账号(实测 302 → account.opendesign.com/downloads) → 不自动下载;
+    # 且**现版 21.5 已满足常规 DWG 转换**(历史端到端实测通过) → 无需刻意升级,
+    # 仅当遇到"新版 DWG 转换失败"时才到官方页面手动获取更新版。
+    print('[ODA] 未找到 ODA File Converter(官方直链需登录账号, 故不自动获取)')
+    print(f'[ODA] 需要时: ① 打开 {ODA_DOWNLOAD_PAGE} 登录/注册(免费) ② 下载 MSI')
+    print(f'[ODA]          ③ 解包到 {TOOLS_DIR} (msiexec /a <msi> /qn TARGETDIR=... 或 7-zip)')
+    print('[ODA] 现版 21.5 即可满足常规转换需求, 无需刻意升级')
+    print('[ODA] 零依赖替代: 请设计方直接导出 DXF(最稳)')
+    return False
 
 EZ_DXF_OK = False
 D2S_OK = False
@@ -161,7 +140,7 @@ def _diagnose_convert_failure(code, out_txt, dwg_path):
         hints.append('文件可能加密/带口令保护 → 请提供未加密图纸')
     if any(k in low for k in ('version', 'unsupported', 'invalid', 'cannot read')):
         hints.append(f'DWG 版本可能不被本地 ODA({_local_oda_version() or "未知"})支持 '
-                     f'→ 升级 ODA 或请设计方另存 DXF')
+                     f'→ 请设计方另存 DXF(或另存低版本 DWG)后重新提供')
     if 'permission' in low or 'access denied' in low:
         hints.append('权限不足 → 检查文件/目录读写权限')
     if not (out_txt or '').strip():
