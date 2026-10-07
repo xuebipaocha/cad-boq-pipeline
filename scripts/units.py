@@ -92,6 +92,15 @@ def resolve_area(total_area_m2, closed_polys, texts, insunits=4, layer_filter=Tr
                 v = float(m2.group(1))
                 if 1 <= v <= 2e7:
                     text_area = max(text_area, v)
+            # v6.10.7 表格型面积标注: 实测 000008 数字与标签**分离**（'建筑面积：占地面积' /
+            # '建筑面积    。' 空模板 / '2411.48m ' / 'S=2411.48m ' 各自独立成条）
+            # → 上文"标签+数字同句"正则必然漏读, 故补 'S=xxx m'(面积符号) 规则。
+            # 注: 只加 S= 这种**明确面积符号**, 不加"独立数值行"——后者会误取建筑体积(8687.25m)等。
+            m_s = re.search(r'\bS\s*=\s*(\d{2,7}(?:\.\d+)?)\s*m\b', t, re.I)
+            if m_s:
+                v = float(m_s.group(1))
+                if 1 <= v <= 2e7:
+                    text_area = max(text_area, v)
 
     area, source = 0.0, ''
     if poly_area > 0:

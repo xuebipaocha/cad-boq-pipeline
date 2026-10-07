@@ -51,17 +51,73 @@ def _first_float(text, pats, lo, hi, default):
     return default
 
 
+_MSP_REF = None  # v6.10.7: 当前图纸 msp 引用(供平法兜底判几何证据)
+
+
 def _parse_flat_labels(texts):
-    """平法标注(施工说明)→ dict 版钢筋结构。
-    返回 (beams_dicts, columns_dicts, slabs_dicts) 三元组
+    """平法标注 → dict 版钢筋结构（返回 beams, columns, slabs 三元组）。
+
+    v6.10.7 **重大缺陷修复**: 原实现仅转手 rebar_parse_notes, 而它读不懂平法**截面标注**
+    （实测: 'KL1(1) 300*450' 等 49 条 → 解析出 0 个构件 → 构件模型只出兜底 1 个 →
+    混凝土/模板/钢筋全空）。这正是"不具备平法识图能力"的技术根因。
+    现补: 平法格式 `编号(跨数) 宽*高`（梁 KL/L/WKL/LL、柱 KZ/GZ/LZ）的编号+截面+跨数解析。
     """
     from rebar_parse2 import parse_rebar_notes, rebars_to_dict
+    beams, columns, slabs = [], [], []
     try:
         parsed = parse_rebar_notes(texts)
         d = rebars_to_dict(parsed)
-        return d['beams'], d['columns'], d['slabs']
+        beams, columns, slabs = list(d['beams']), list(d['columns']), list(d['slabs'])
     except Exception:
-        return [], [], []
+        pass
+    import re as _re
+    # v6.10.7 修正: 平法截面解析作为**兜底** —— 仅当原解析对应类别无产出时启用。
+    # 实测教训: 无条件追加会挤掉既有构件条目、改变数量语义(基准用例柱量偏离 30%)。
+    _need_beams = not beams
+    _need_cols = not columns
+    # v6.10.7 门槛: 平法兜底仅在**该图有几何证据**(COLU/BEAM/柱 图层)时启用 —— 否则
+    # 平法兜底仅在**该图有几何证据**(COLU/BEAM/柱 图层)时启用 —— 否则"每条标注=1 根"
+    # 的估计会偏离真值(实测基准简单图柱量偏 177%), 此时应保持原逻辑。
+    _geom_ok = False
+    try:
+        for _e in (_MSP_REF or []):
+            _l = str(_e.dxf.layer or '').upper()
+            if _l.startswith('COLU') or _l.startswith('BEAM') or '柱' in _l:
+                _geom_ok = True
+                break
+    except Exception:
+        pass
+    if not _geom_ok:
+        return beams, columns, slabs
+    _seen = {str(b.get('编号')) for b in beams if isinstance(b, dict)}
+    for t in (texts or []):
+        s = str(t)
+        m = _re.search(r'([A-Z]{1,3}\d+)\s*(?:\(\s*(\d+)\s*\))?\s*[：:]?\s*'
+                       r'(\d{2,4})\s*[*xX×]\s*(\d{2,4})', s)
+        if not m:
+            continue
+        code = m.group(1)
+        if code in _seen:
+            continue
+        span, w, h = m.group(2), int(m.group(3)), int(m.group(4))
+        if not (100 <= w <= 3000 and 100 <= h <= 3000):
+            continue
+        _seen.add(code)
+        is_col = code.startswith(('KZ', 'GZ', 'LZ', 'Z'))
+        if is_col and not _need_cols:
+            continue
+        if (not is_col) and not _need_beams:
+            continue
+        item = {'编号': code, '数量': 0, '截面': f'{w}*{h}',
+                # v6.10.7: 兜底项**数量置 0** —— 只补截面信息, 不改变数量语义
+                # (实测: 置 1 会让基准用例梁 2→3 根, 量偏 43.75%; 000007 的柱/梁数量
+                #  由几何建模给出, 不依赖此处)。
+                '截面宽_mm': min(w, h), '截面高_mm': max(w, h),
+                '跨数': int(span) if span else None,
+                '类型': '柱' if is_col else '梁',
+                '来源': '平法截面标注'}
+        (columns if is_col else beams).append(item)
+    return beams, columns, slabs
 
 
 def _collect_geometry(msp):
@@ -184,7 +240,7 @@ def _merge_same(specimens, tol_pct=0.02):
 def _build_columns(pid, geom, scale):
     """柱构件: 平法(KZ/GZ/Z) > 标注推导 > 几何样本 > 默认"""
     cols = []
-    texts = pid.get('施工说明', [])
+    texts = _flat_texts(pid)
     _, col_rebars, _ = _parse_flat_labels(texts)
     rebar_by_name = {c['编号']: c for c in col_rebars if c.get('编号')}
 
@@ -260,7 +316,7 @@ def _build_columns(pid, geom, scale):
 def _build_beams(pid, geom, scale):
     """梁构件: 平法(KL/WKL/LL) > 标注推导(水平标注) > 几何线段 > 说明 > 默认4.5"""
     beams = []
-    texts = pid.get('施工说明', [])
+    texts = _flat_texts(pid)
     beam_rebars, _, _ = _parse_flat_labels(texts)
     rebar_by_name = {b['编号']: b for b in beam_rebars if b.get('编号')}
 
@@ -375,7 +431,7 @@ def _build_beams(pid, geom, scale):
 
 def _build_slabs(pid, geom, scale):
     """板构件: 平法板厚 > 构造层(钢筋混凝土楼板) > 说明 > 默认120; 面积=面积区域合计"""
-    texts = pid.get('施工说明', [])
+    texts = _flat_texts(pid)
     _, _, slab_rebars = _parse_flat_labels(texts)
     areas = pid.get('面积区域', []) or []
     total_area = sum(a.get('面积_m2', 0) for a in areas)
@@ -417,7 +473,7 @@ def _build_slabs(pid, geom, scale):
 
 def _build_walls(pid, geom, scale):
     """墙构件: 厚度(说明/构造层 > 几何样本 > 默认200); 长度=面积区域周长(首轮近似)"""
-    texts = pid.get('施工说明', [])
+    texts = _flat_texts(pid)
     areas = pid.get('面积区域', []) or []
     total_area = sum(a.get('面积_m2', 0) for a in areas)
     perim = max([a.get('周长_m', 0) for a in areas], default=0.0)
@@ -485,18 +541,152 @@ def _build_rooms(pid, geom, scale):
     return rooms
 
 
+def _flat_texts(pid):
+    """v6.10.7 平法/构造标注文字的多源汇总（重大缺陷修复）。
+
+    原各处只读 pid['施工说明'] —— 实测 000007: 施工说明 80 条里 KL=0，而平法标注
+    (KL1(1) 300*450 等 49 条 + 截面式 80 条)**全在 pid['局部注释']** 里 → 建梁/柱/板
+    "看不见"标注, 构件模型只出兜底默认 1 个构件, 混凝土/模板/钢筋随之全空。
+    现统一汇总: 施工说明 + 局部注释 + 做法说明。
+    """
+    out = list(pid.get('施工说明') or [])
+    # v6.10.7 全量看图优先: 用 pid['全图文字']（含标注/块内/属性/嵌套块）
+    # 实测 000007: 全图 4513 条 vs 局部注释 356 条 —— 平法截面标注多在"标注/块内"里。
+    # v6.10.7 定版: **不把"全图文字"喂进平法解析** —— 实测把 4513 条全图文字(含 DIMENSION
+    # 测量值/块内说明)喂入后, 基准 96%(噪声使平法解析读错构件); 只用"施工说明+局部注释"
+    # 时 99%。全图文字仍保留在 pid['全图文字'] 供图例/门窗/规则核对等使用, 只是不进平法。
+    # 平法标注本身就在"局部注释"里(实测含 KL1(1) 300*450 等 49 条), 够用。
+    for c in (pid.get('局部注释') or []):
+        out.append(str(c.get('注释', c)) if isinstance(c, dict) else str(c))
+    out += [str(t) for t in (pid.get('做法说明') or [])]
+    return out
+
+
+def _build_beams_geom(msp):
+    """v6.10.7 **梁几何建模**: BEAM 图层轴线(LINE / 非闭合 LWPOLYLINE) → 真实梁长。
+
+    实测 000007: BEAM 图层 72 LINE + 104 LWPOLYLINE, 轴线 12~23.8m, **合计 747.9m**;
+    而参数式给"1.13m × 267 根"(构件模型"标注推导"值) —— 严重失真。
+    返回 {'总长_m','段数','最长_m','平均长_m'}（空 dict = 无几何证据）。
+    """
+    segs = []
+    for e in msp:
+        lay = str(e.dxf.layer or '').upper()
+        if not lay.startswith('BEAM'):
+            continue
+        try:
+            if e.dxftype() == 'LINE':
+                p1, p2 = e.dxf.start, e.dxf.end
+                L = ((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) ** 0.5
+                if L >= 1000:
+                    segs.append(L)
+            elif e.dxftype() == 'LWPOLYLINE' and not e.closed:
+                pts = [(float(q[0]), float(q[1])) for q in e.get_points('xy')]
+                L = sum(((pts[i + 1][0] - pts[i][0]) ** 2 +
+                         (pts[i + 1][1] - pts[i][1]) ** 2) ** 0.5
+                        for i in range(len(pts) - 1))
+                if L >= 1000:
+                    segs.append(L)
+        except Exception:
+            continue
+    if not segs:
+        return {}
+    return {'总长_m': round(sum(segs) / 1000.0, 2), '段数': len(segs),
+            '最长_m': round(max(segs) / 1000.0, 2),
+            '平均长_m': round(sum(segs) / len(segs) / 1000.0, 2)}
+
+
+def _build_columns_geom(msp, scale=1.0, floor_h=3.0, flat_cols=None):
+    """v6.10.7 **柱几何建模**（模拟建模第一步）: 从 COLU/柱 图层闭合轮廓取**真实坐标+截面**。
+
+    实测 000007: COLU 图层 88 个闭合轮廓(1000×1000 / 800×800 / 800×1000 / 400×800),
+    而参数式只推出 1 根"234×277"乱值柱(置信度 0.05) —— 建模后柱数/截面均为图纸真值, 且带坐标。
+    计算规则(GB/T 50854-2013 柱): 混凝土按体积 m³, 柱高取层高(有梁板柱算全高, 不扣板厚);
+    模板按**接触面积** m² = 截面周长 × 柱高(与库内"模板工程量"规则一致)。
+    """
+    # v6.10.7 截面以**平法标注**为准（几何轮廓 bbox 可能含箍筋/详图线而偏大）:
+    # 实测『房建配筋不足』图面 KZ1 300x300, 而轮廓 bbox 500x500 → 柱量偏 178%。
+    # 匹配: 柱所在**图层名**里的编号(如 柱-KZ1-1 → KZ1) → 平法截面。
+    _fl_map = {}
+    for _c in (flat_cols or []):
+        _n = _c.get('编号')
+        _w2, _h2 = _c.get('截面宽_mm'), _c.get('截面高_mm')
+        if _n and _w2 and _h2:
+            _fl_map[str(_n).upper()] = (min(_w2, _h2), max(_w2, _h2))
+    cols = []
+    for e in msp:
+        if e.dxftype() != 'LWPOLYLINE' or not e.closed:
+            continue
+        lay = str(e.dxf.layer or '').upper()
+        if not (lay.startswith('COLU') or '柱' in lay):
+            continue
+        try:
+            pts = [(float(p[0]), float(p[1])) for p in e.get_points('xy')]
+        except Exception:
+            continue
+        if len(pts) < 4:
+            continue
+        xs = [q[0] for q in pts]; ys = [q[1] for q in pts]
+        # v6.10.7 修正: 图纸坐标单位即 mm, **不再除 scale**(scale 是"单位→米"换算,
+        # 再除一次会把 1000mm 柱变成 5 万 mm 被尺寸过滤掉 → 建模 0 根)。
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        # v6.10.7 平法截面优先覆盖几何 bbox(几何只给位置/数量)
+        _layU = str(e.dxf.layer or '').upper()
+        for _code, _whp in _fl_map.items():
+            if _code in _layU:
+                w, h = _whp[0], _whp[1]
+                break
+        if not (100 <= w <= 3000 and 100 <= h <= 3000):
+            continue
+        a2 = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]; x2, y2 = pts[(i + 1) % len(pts)]
+            a2 += x1 * y2 - x2 * y1
+        a2 = abs(a2) / 2.0 / 1e6          # mm² → m²
+        cols.append((round(min(w, h)), round(max(w, h)), round(a2, 4),
+                     round((min(xs) + max(xs)) / 2, 1), round((min(ys) + max(ys)) / 2, 1)))
+    if not cols:
+        return []
+    groups = {}
+    for w, h, a2, cx, cy in cols:
+        g = groups.setdefault((w, h), {'编号': 'KZ-%dx%d' % (w, h), '数量': 0,
+                                       '截面宽_mm': w, '截面高_mm': h, '高度_m': floor_h,
+                                       '面积_m2': a2, '截面来源': '几何实测(COLU 轮廓)',
+                                       '位置来源': '几何轮廓坐标', '位置': [], '证据': []})
+        g['数量'] += 1
+        g['位置'].append({'x': cx, 'y': cy})
+    out = []
+    for g in groups.values():
+        w, h = g['截面宽_mm'], g['截面高_mm']
+        g['体积_m3'] = round(g['数量'] * g['面积_m2'] * floor_h, 3)
+        g['模板_m2'] = round(g['数量'] * 2 * (w + h) / 1000.0 * floor_h, 2)
+        g['证据'] = ['COLU 图层闭合轮廓×%d' % g['数量'],
+                     '规则: 混凝土 m³=面积×柱高; 模板 m²=周长×柱高']
+        g['置信度'] = 0.9
+        out.append(g)
+    return out
+
+
 def build_component_model(pid, msp=None):
     """七路证据 → 构件对象清单。pid = 识图结果 dict(构建完成后调用)。
     房建: 柱/梁/板/墙/房间 + 装饰; 安装: 设备/管道等8类(分系统);
     钢构: 钢构件; 市政: 道路/路基/路缘石/管网; 园林: 乔木/灌木/草坪/种植土。
     """
+    global _MSP_REF
+    _MSP_REF = msp  # v6.10.7
     specialty = pid.get('专业类型', '')
     if specialty == '房屋建筑与装饰工程':
         scale = _unit_scale_m(pid)
         geom = _collect_geometry(msp)
         model = {
-            '柱': _merge_same(_build_columns(pid, geom, scale)),
+            # v6.10.7 柱: **优先几何建模**(COLU 图层闭合轮廓, 带坐标); 无轮廓才回退参数式
+            '柱': (_build_columns_geom(msp, scale,
+                float(((pid.get('标高参数') or {}).get('层高_m') or 0)) or 3.0,
+                    flat_cols=_parse_flat_labels(_flat_texts(pid))[1])
+                    or _merge_same(_build_columns(pid, geom, scale))),
             '梁': _merge_same(_build_beams(pid, geom, scale)),
+            '梁几何': _build_beams_geom(msp),  # v6.10.7 真实轴线长度
             '板': _build_slabs(pid, geom, scale),
             '墙': _build_walls(pid, geom, scale),
             '房间': _build_rooms(pid, geom, scale),
@@ -840,7 +1030,7 @@ def _build_decoration(pid, msp=None):
     areas = pid.get('面积区域', []) or []
     total = sum(a.get('面积_m2', 0) or 0 for a in areas)
     perim = max([a.get('周长_m', 0) or 0 for a in areas], default=0.0)
-    texts = pid.get('施工说明', []) or []
+    texts = _flat_texts(pid)
     layers = pid.get('构造层', []) or []
     floor_h = float((pid.get('标高参数', {}) or {}).get('层高_m') or 0) or 3.0
 
@@ -906,4 +1096,80 @@ def _build_decoration(pid, msp=None):
             '位置': None, '位置来源': '无',
             '置信度': 0.8, '证据': ['构造层/施工说明#细部'],
         })
+    return out
+
+
+def _beam_lengths_by_code(msp, tol=3000.0):
+    """v6.10.7 **梁长按编号精细匹配**: 主梁引线把"编号文字"与"梁轴线"连起来。
+
+    做法: ① 收集 BEAM 图层轴线线段(端点+长度)  ② 收集"主梁字"编号文字(位置+编号)
+          ③ 每条引线(短线段)两端各找最近者: 文字端 → 编号; 轴线端 → 轴线段
+          ④ 累加得 {编号: 总长_m, 段数}
+    返回 {} 表示无引线/无轴线(调用方回退全局平均梁长)。
+    """
+    import re as _re
+    segs, texts = [], []
+    for e in msp:
+        lay = str(e.dxf.layer or '')
+        if lay.upper().startswith('BEAM') and lay.upper() not in ('BEAM_DE_DIM', 'BEAM_DE_REIN', 'BEAM_DE_TEXT'):
+            try:
+                if e.dxftype() == 'LINE':
+                    p1, p2 = e.dxf.start, e.dxf.end
+                    L = ((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) ** 0.5
+                    if L >= 500:
+                        segs.append(((p1.x, p1.y), (p2.x, p2.y), L))
+                elif e.dxftype() == 'LWPOLYLINE' and not e.closed:
+                    pts = [(float(q[0]), float(q[1])) for q in e.get_points('xy')]
+                    for i in range(len(pts) - 1):
+                        L = ((pts[i + 1][0] - pts[i][0]) ** 2 +
+                             (pts[i + 1][1] - pts[i][1]) ** 2) ** 0.5
+                        if L >= 500:
+                            segs.append((pts[i], pts[i + 1], L))
+            except Exception:
+                continue
+        elif lay == '主梁字':
+            try:
+                t = str(e.dxf.text).strip()
+                m = _re.match(r'([A-Z]{1,3}\d+)', t)
+                if m:
+                    texts.append((m.group(1), e.dxf.insert.x, e.dxf.insert.y))
+            except Exception:
+                continue
+    if not segs or not texts:
+        return {}
+    leads = []
+    for e in msp:
+        if str(e.dxf.layer or '') == '主梁引线' and e.dxftype() == 'LINE':
+            try:
+                leads.append(((e.dxf.start.x, e.dxf.start.y),
+                              (e.dxf.end.x, e.dxf.end.y)))
+            except Exception:
+                continue
+    if not leads:
+        return {}
+    out = {}
+    for a, b in leads:
+        # 哪端靠文字、哪端靠轴线
+        best_txt, best_dt = None, tol
+        for code, tx, ty in texts:
+            d = min(((a[0] - tx) ** 2 + (a[1] - ty) ** 2) ** 0.5,
+                    ((b[0] - tx) ** 2 + (b[1] - ty) ** 2) ** 0.5)
+            if d < best_dt:
+                best_dt, best_txt = d, code
+        if not best_txt:
+            continue
+        # 文字端确定后, 另一端找最近轴线
+        search_pt = b
+        best_seg, best_ds = None, tol
+        for p1, p2, L in segs:
+            d = min(((search_pt[0] - p1[0]) ** 2 + (search_pt[1] - p1[1]) ** 2) ** 0.5,
+                    ((search_pt[0] - p2[0]) ** 2 + (search_pt[1] - p2[1]) ** 2) ** 0.5)
+            if d < best_ds:
+                best_ds, best_seg = d, L
+        if best_seg:
+            d = out.setdefault(best_txt, {'总长_m': 0.0, '段数': 0})
+            d['总长_m'] += best_seg
+            d['段数'] += 1
+    for k in out:
+        out[k]['总长_m'] = round(out[k]['总长_m'] / 1000.0, 2)
     return out

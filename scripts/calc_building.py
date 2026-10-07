@@ -101,7 +101,7 @@ def _floor_count(texts):
                 return v
     return 1
 
-def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0):
+def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0, views=None):
     """钢筋量: 平法标注结构化解析(v4.2) > 配筋率(全构件体积) > 含钢量 > 默认65kg/m²
     v6.9.5 思维层②: 返回附'参考对比' — 平法/配筋率/含钢量多法互证(偏差>30%提示)。
     """
@@ -112,7 +112,19 @@ def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0):
         tc = ' '.join(texts or [])
         m = re.search(r'\bC([234]\d)\b', tc)
         return f'C{m.group(1)}' if m else 'C30'
-    parsed = parse_rebar_notes(texts)
+    # v6.10.7 优先: **图幅分区配筋**(按图名把构件与其配筋配对) —— 实测可读出梁201/柱59,
+    # 而单纯 parse_rebar_notes(施工说明) 只读到板筋 7 组 → 钢筋长期停留在含钢量估算。
+    parsed = None
+    if views:
+        try:
+            from rebar_parse2 import build_parsed_from_views, parse_rebar_by_view
+            _vp = build_parsed_from_views(parse_rebar_by_view(views))
+            if _vp and (_vp['beams'] or _vp['columns'] or _vp['slabs']):
+                parsed = _vp
+        except Exception as _e_v:
+            print('  图幅配筋解析跳过: %s' % _e_v)
+    if parsed is None:
+        parsed = parse_rebar_notes(texts)
     if parsed['beams'] or parsed['columns'] or parsed['slabs']:
         total, detail = calc_total_steel(parsed, bfa, col_h=col_h, beam_len=beam_len,
                                          concrete=_concrete_grade(texts))
@@ -219,6 +231,13 @@ def calc(data):
     sizes = _sizes(bi.get("构件尺寸样本", {}), data.get("构件尺寸推导", {}))
     texts = data.get('施工说明', [])
     tc = ' '.join(texts)
+    # v6.10.7 ④ 平法/配筋解析专用文字池: 汇总**全图文字**(含平法配筋标注 %%c6@100/200、块内、
+    # 标注文本)。实测教训: 原只喂"施工说明"(80 条) → _parse_rebar 读不到配筋 → 退回
+    # 65kg/m² 含钢量估算; 而全图文字 4513 条里配筋标注就在其中。
+    # 注: 仅用于平法解析, 不并入 tc(避免 4513 条文字污染其它关键词判断语境)。
+    _flat_rebar = list(texts)
+    for _x in (data.get('全图文字') or []):
+        _flat_rebar.append(str(_x.get('文本', _x)) if isinstance(_x, dict) else str(_x))
 
     col_count = elem.get('框架柱', 0) or elem.get('柱', 0)
     beam_count = elem.get('框架梁', 0) or elem.get('梁', 0)
@@ -232,7 +251,15 @@ def calc(data):
     cm_slabs, cm_walls = cm.get('板', []) or [], cm.get('墙', []) or []
     cm_n, cm_w, cm_h, cm_floor_h = _cm_cols(cm_cols, 0)
     cm_bn, cm_bw, cm_bh, cm_beam_len = _cm_beams(cm_beams, 0)
-    if cm_n:
+    # v6.10.7 门槛: 只认**带真实坐标(位置非空)**的柱 —— 几何建模产物;
+    # 参数式推导的柱 position 为 null → 保持原口径(基准用例不受影响)。
+    _geom_cols = [x for x in cm_cols
+                   if isinstance(x.get('位置'), (list, dict)) and x.get('位置')]
+    if _geom_cols:
+        # v6.10.7 ②几何建模优先: 有真实轮廓坐标时**以模型为准**(cm_n), 不用 CAD 图元计数
+        # (实测 000007: 图元计数 101 / 模型 91 / 几何轮廓 88 → 三值不一致, 统一取几何建模值)
+        col_count = cm_n
+    elif cm_n:
         col_count = max(col_count, cm_n)
     if cm_w and cm_h:
         sizes['框架柱'] = (cm_w, cm_h)
@@ -241,11 +268,18 @@ def calc(data):
     if cm_bw and cm_bh:
         sizes['框架梁'] = (cm_bw, cm_bh)
 
-    # 建筑面积: 优先主体.建筑面积, 否则识图总面积×层数
+    # 建筑面积（v6.10.7 口径归正）: 按 GB/T 50353-2013 规则 —— 逐层外墙围合轮廓求和。
+    # 单图幅图纸: 图上仅一层平面 → "单层轮廓 × 层数"等价于逐层求和(成立);
+    # **多图幅混排图纸: 几何常取到剖面/详图轮廓 → 禁用按层数放大**(实测 000008 几何 47m²
+    # × 4 层 = 188m², 而真实建筑面积 2411.48m²), 改为标待核, 不产出错数。
     bfa = main.get('建筑面积_m2', 0)
     floors = _floor_count(texts)
     if bfa == 0 and total > 0:
-        bfa = total * floors
+        if (data.get('图幅面积参考') or {}).get('幅数'):
+            bfa = 0
+            print('  建筑面积: 多图幅混排 → 不按层数放大(几何值不可靠), 标待核实')
+        else:
+            bfa = total * floors
 
     # 层高/板厚/墙厚: 标高参数(楼层差) > 施工说明提取
     floor_h = float((data.get('标高参数', {}) or {}).get('层高_m') or 0) or \
@@ -296,7 +330,12 @@ def calc(data):
         # v4.2: 梁长优先取标注推导(水平标注值), 再取说明, 最后默认4.5m
         # v5.0: 构件模型梁长(融合标注/几何/说明)最高优先
         dim_len = 0
-        if cm_beam_len:
+        # v6.10.7 门槛式几何优先: **有 BEAM 轴线几何**时, 平均梁长 = 几何总长/梁根数;
+        # 无几何(基准简单图)则保持构件模型值 —— 无条件替换会使基准退化(实测 100%→98%)。
+        _bgm2 = (cm.get('梁几何') or {})
+        if _bgm2.get('总长_m') and cm_bn:
+            beam_len = round(_bgm2['总长_m'] / cm_bn, 2)
+        elif cm_beam_len:
             beam_len = cm_beam_len
             dim_note = '构件模型梁长'
         else:
@@ -305,7 +344,20 @@ def calc(data):
                     dim_len = max(dim_len, dims['长_mm'])
             beam_len = dim_len / 1000 if dim_len else _first_float(tc, [r'梁长[为]?\s*(\d+\.?\d*)\s*m'], 2, 12, 4.5)
             dim_note = '标注梁长' if dim_len else ''
-        vol = round(beam_count * beam_area_m2 * beam_len, 2)
+        # v6.10.7 ②梁量按**几何轴线总长**计(GB/T 50854: 梁按体积 m3):
+        # 实测 000007: BEAM 轴线合计 747.9m, 而"根数×长度"式给 267×1.13m(失真)。
+        _bg = (cm.get('梁几何') or {})
+        # v6.10.7 门槛: 几何总长需与梁模型坐标一致(或段数≥3)才启用, 防简单图误切
+        # 判据: 几何总长存在即用(基准简单图无 BEAM 几何 → 自动回退参数式)
+        _beam_geom_ok = bool(_bg.get('总长_m'))
+        if _beam_geom_ok:
+            vol = round(_bg['总长_m'] * beam_area_m2, 2)
+            calc_beam = (f"梁轴线几何总长 {_bg['总长_m']}m({_bg['段数']} 段, "
+                         f"最长 {_bg['最长_m']}m) × 平均截面 {beam_area_m2:.3f}m²")
+        else:
+            vol = round(beam_count * beam_area_m2 * beam_len, 2)
+            calc_beam = f'{beam_count}根×{beam_area_m2:.3f}m²×{beam_len}m({dim_note})'
+
         # v6.0 P1-c: 梁柱扣减 — 梁端伸入柱内重叠体积(每根梁按两端入柱扣减)
         deduct_note = ''
         if col_count > 0 and col_w > 0 and col_h > 0:
@@ -317,10 +369,19 @@ def calc(data):
                     vol = 0.0
                 deduct_note = f'-梁柱重叠{overlap}m³'
         con_vol_total += vol
-        r.append({'分项名称':'现浇混凝土梁','单位':'m³','工程量':vol,'计算式':f'{beam_count}根×{beam_area_m2:.3f}m²(实测截面)×{beam_len}m({dim_note}){deduct_note}','定额编号':'','备注':'CAD实测'})
+        r.append({'分项名称':'现浇混凝土梁','单位':'m³','工程量':vol,
+                  '计算式':calc_beam + deduct_note, '定额编号':'',
+                  '备注':'CAD实测(几何建模)', '数据来源':'实测'})
 
     # ── 板 (v6.0: 扣洞口 — 板洞/楼梯井等) ──
-    slab_vol = round(bfa * slab_thick_mm / 1000, 2)
+    # v6.10.7 ①板混凝土按**板面积**×板厚(GB/T 50854: 板按体积) —— 原用建筑面积(bfa)
+    # 会把'整栋建筑面积'当板面积(实测 000007: 1276.8×120mm=153m³, 严重偏大)。
+    _geom_slabs = [x for x in cm_slabs
+                   if x.get('位置') or any(k in str(x.get('面积来源') or '')
+                                           for k in ('几何', '多图幅', '实测', '轮廓'))]
+    _slab_area_m2 = (sum((x.get('面积_m2') or 0) for x in _geom_slabs)
+                     if _geom_slabs else bfa)
+    slab_vol = round(_slab_area_m2 * slab_thick_mm / 1000, 2)
     hole_area, hole_note = _deduct_slab_holes(data, bfa)
     if hole_area > 0:
         slab_vol = round(slab_vol - hole_area * slab_thick_mm / 1000, 2)
@@ -340,15 +401,20 @@ def calc(data):
             tmpl.append(('柱模板', round(2 * (col_w + col_h) / 1000 * floor_h * cm_n, 2),
                          f'{cm_n}根×周长{2*(col_w+col_h)/1000:.2f}m×层高{floor_h}m'))
         if cm_bn and beam_w and beam_h:
-            tmpl.append(('梁模板', round(2 * (beam_w + beam_h) / 1000 * beam_len * cm_bn, 2),
-                         f'{cm_bn}根×2×(宽{beam_w}+高{beam_h})×长{beam_len}m'))
+            _bg2 = (cm.get('梁几何') or {})
+            _bl_m = (_bg2.get('总长_m') or 0) or (beam_len * cm_bn)
+            tmpl.append(('梁模板', round(2 * (beam_w + beam_h) / 1000 * _bl_m, 2),
+                         f'梁轴线总长{_bl_m:.2f}m × 2×(宽{beam_w}+高{beam_h})/1000'))
         if total > 0 and floors:
-            tmpl.append(('板模板', round(total * floors, 2), f'板面积{total:.0f}m²×{floors}层(底模)'))
+            _slab_a = (sum((x.get('面积_m2') or 0) for x in _geom_slabs)
+                       if _geom_slabs else total)
+            tmpl.append(('板模板', round(_slab_a, 2),
+                         f'板面积{_slab_a:.2f}m²(构件模型, 底模; 原"总面积×层数"已废'))
         if cm_walls:
             wall_vol = sum(float(w.get('体积_m3', 0) or 0) for w in cm_walls)
             wall_th = (cm_walls[0].get('厚度_mm') or wall_thick_mm or 200) / 1000
             if wall_vol > 0 and wall_th > 0:
-                tmpl.append(('墙模板', round(2 * wall_vol / wall_th, 2),
+                tmpl.append(('墙模板', round(2 * wall_vol / wall_th if wall_th else 0, 2),
                              f'2×墙体积{wall_vol:.1f}m³÷墙厚{wall_th*1000:.0f}mm'))
     except Exception:
         tmpl = []
@@ -357,7 +423,12 @@ def calc(data):
                   '计算式': f'{tnote}(模板接触面积)', '定额编号': '', '备注': 'CAD实测'})
 
     # ── 钢筋 ──
-    rebar_weight, rebar_note = _parse_rebar(texts, bfa, con_vol_total, col_h=floor_h, beam_len=beam_len)
+    # v6.10.7 板筋量 = 含量 × **板面积**(不是建筑面积) —— 建筑面积口径修正后多图幅图 bfa=0,
+    # 会使板筋归零(实测主链钢筋 33.35t vs 直调 83.21t, 差的就是板筋)。
+    _bfa_rebar = bfa or sum((x.get('面积_m2') or 0) for x in cm_slabs) or total
+    rebar_weight, rebar_note = _parse_rebar(_flat_rebar, _bfa_rebar, con_vol_total,
+                                            col_h=floor_h, beam_len=beam_len,
+                                            views=data.get('全图文字'))
     r.append({'分项名称':'钢筋','单位':'t','工程量':rebar_weight,'计算式':rebar_note,'定额编号':'','备注':'平法标注/配筋率'})
 
     # ── 砌体 (v6.0: 扣门窗洞口) ──

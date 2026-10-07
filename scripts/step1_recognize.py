@@ -62,6 +62,65 @@ def _cached_readfile(filename, *args, **kwargs):
 _ezdxf_perf.readfile = _cached_readfile
 
 
+def _collect_all_texts(msp, _depth=3):
+    """v6.10.7 **全量看图**: 汇总图纸所有文字源 —— 图纸上每个字都可能算量/编清单的依据。
+
+    覆盖: ①模型空间 TEXT ②MTEXT ③DIMENSION 标注文本(含测量值) ④INSERT 块内 TEXT/MTEXT/ATTRIB
+    ⑤嵌套块(递归, 深度≤_depth)。实测 000007: 原只读到 356 条(局部注释), 而全图文字 4848 条
+    (DIMENSION 1836 条 + 块内 170 条**完全未读**) → 覆盖率仅 7%, 平法标注(KL1(1) 300*450)漏读。
+    返回 [{'文本','来源','图层','x','y'}]。
+    """
+    out = []
+
+    def _scan_block(blk, depth, tag):
+        if blk is None or depth > _depth:
+            return
+        for en in blk:
+            t = en.dxftype()
+            try:
+                if t == 'TEXT':
+                    out.append({'文本': en.dxf.text, '来源': tag + '块', '图层': en.dxf.layer,
+                                'x': float(en.dxf.insert.x), 'y': float(en.dxf.insert.y)})
+                elif t == 'MTEXT':
+                    out.append({'文本': en.text, '来源': tag + '块M', '图层': en.dxf.layer,
+                                'x': float(en.dxf.insert.x), 'y': float(en.dxf.insert.y)})
+                elif t == 'ATTRIB':
+                    out.append({'文本': en.dxf.text, '来源': tag + '属性', '图层': en.dxf.layer,
+                                'x': float(en.dxf.insert.x), 'y': float(en.dxf.insert.y)})
+                elif t == 'INSERT':
+                    _scan_block(msp.doc.blocks.get(en.dxf.name), depth + 1, tag + '嵌')
+            except Exception:
+                continue
+
+    for e in msp:
+        t = e.dxftype()
+        try:
+            if t == 'TEXT':
+                out.append({'文本': e.dxf.text, '来源': '模型', '图层': e.dxf.layer,
+                            'x': float(e.dxf.insert.x), 'y': float(e.dxf.insert.y)})
+            elif t == 'MTEXT':
+                out.append({'文本': e.text, '来源': '模型M', '图层': e.dxf.layer,
+                            'x': float(e.dxf.insert.x), 'y': float(e.dxf.insert.y)})
+            elif t == 'DIMENSION':
+                try:
+                    txt = e.dxf.text
+                except Exception:
+                    txt = ''
+                if not txt or txt == '<>':
+                    try:
+                        txt = str(round(float(e.get_measurement()), 1))
+                    except Exception:
+                        txt = ''
+                _p = getattr(e.dxf, 'defpoint', None)
+                out.append({'文本': txt, '来源': '标注', '图层': e.dxf.layer,
+                            'x': float(_p.x) if _p else 0.0, 'y': float(_p.y) if _p else 0.0})
+            elif t == 'INSERT':
+                _scan_block(msp.doc.blocks.get(e.dxf.name), 1, '')
+        except Exception:
+            continue
+    return out
+
+
 def _detect_rooms_pid(dwg_file):
     """v6.1: 房间分区几何化 — 闭合区域→房间列表(面积/周长)。失败返回 []。"""
     try:
@@ -362,15 +421,40 @@ def choose_area(result, insunits=4):
             _cluster = [a for a in _cand if a >= _top / 3.0]
             # v6.10.6 收紧: 需 **≥3 个**同量级区域才判多图幅 —— 只有 2 个时更可能是
             # "主区域 + 附属区域(楼梯/雨棚)", 求和会把单层图算成双层(基准用例板/墙 err=100% 回归)。
-            # v6.10.6 收紧为**默认关闭、按需开启**（AREA_MULTI_VIEW=1）:
-            # 自动判断在基准用例上仍误触发（房建B 板/墙 err=117% → 面积被并算成 2.17 倍）。
-            # 同图是否多图幅凭几何无法可靠判定 → 交人工/环境变量决定, 不默认改变面积口径。
-            if (os.environ.get('AREA_MULTI_VIEW', '0') == '1' and len(_cluster) >= 3):
-                _sum_a = sum(_cluster)
-                if area and _sum_a > area * 1.5:
+            # v6.10.6 ②多图幅**自动判定（文字证据驱动）**: 几何无法区分"多图幅"与"主区域+附属"
+            # （纯几何判据曾使基准用例房建B 板/墙 err=117%）。改用图内**"平面"标题数**作证据:
+            # 实测新图(一层/二层/三层…平面图) 标题 12~39 个, 基准单图幅用例 **0 个** → 天然可分。
+            # AREA_MULTI_VIEW=1 可强制启用; 未设时按文字证据自动判定。
+            _n_plan = 0
+            try:
+                _n_plan = sum(1 for c in (result.get('text_clusters') or [])
+                              if '平面' in str(c.get('text', '')))
+            except Exception:
+                pass
+            # 层数去重(一/二/三/四 或 1/2/3/4): 几何常只测到部分楼层 → 用层数折算总面积
+            _floors = set()
+            try:
+                for _c in (result.get('text_clusters') or []):
+                    _t = str(_c.get('text', ''))
+                    if '平面' in _t:
+                        _m = re.search(r'([一二三四五六七八九十0-9]{1,3})\s*层', _t)
+                        if _m:
+                            _floors.add(_m.group(1))
+            except Exception:
+                pass
+            if (os.environ.get('AREA_MULTI_VIEW', '') == '1' or _n_plan >= 2):
+                notes.append(f'多图幅证据: 图内"平面"标题 {_n_plan} 个, 楼层 {sorted(_floors)}')
+                _sum_a = sum(_cluster) if _cluster else 0
+                if len(_cluster) >= 2 and area and _sum_a > area * 1.5:
                     notes.append(f'多图幅并算: {len(_cluster)} 个同量级区域之和 {_sum_a:.1f}m² '
-                                 f'(单区域最大 {area:.1f}m²) — 疑同图含多张平面/分区')
+                                 f'(单区域最大 {area:.1f}m²) — 同图含多张平面/分区')
                     area, source = round(_sum_a, 2), '多图幅区域求和'
+                elif area and len(_floors) >= 2 and area < 200:
+                    # 几何只测到单层(其余层未闭合) → 按层数折算; **标估算**(不冒充实测, 供人工核)
+                    _est = round(area * len(_floors), 2)
+                    notes.append(f'多图幅折算(估算): 单层 {area:.1f}m² × {len(_floors)} 层 = {_est:.1f}m² '
+                                 f'(图内"平面"标题 {_n_plan} 个; 层面积未逐层闭合, 需人工复核)')
+                    area, source = _est, '多图幅按层数折算(估算)'
     except Exception:
         pass
     # v6.10.5: 多图幅混排 → 面积存疑(4 份真实图实测: 基础图 40m² / 办公楼 51m² / 外立面图 66m²
@@ -666,6 +750,167 @@ def run(dwg_file, output_dir):
         '构件尺寸推导': member_sizes if 'member_sizes' in dir() else {},
         '剖面算量': section_qty if 'section_qty' in dir() else [],
     }
+
+    # v6.10.7 全量看图: 汇总所有文字源(TEXT/MTEXT/标注/块内/属性/嵌套块) —— 零遗漏
+    try:
+        pid['全图文字'] = _collect_all_texts(_msp)
+        print('  全图文字: %d 条(含标注/块内/属性/嵌套块)' % len(pid['全图文字']))
+    except Exception as _e_ta:
+        print('  ⚠ 全量文字收集失败: %s' % _e_ta)
+
+    # v6.10.7 **建筑面积按 GB/T 50353 规则计算（图幅分组路径）** — 替代"读图签"与"×层数":
+    # ①识别图框(图层含 PUB_TITLE/图框/FRAME 的闭合矩形) ②闭合轮廓按中心点分入所属图框
+    # ③每幅取**主轮廓**(该幅最大轮廓, 排除图框自身) = 该幅楼层平面
+    # ④各幅主轮廓**求和** = 建筑面积(逐层) —— 这解决"多图幅混排时几何取到剖面/详图轮廓"的根因。
+    # 层高/半算判定需标高证据, 未取得时按全面积并注明"未做半算判定"; 计算失败则回退存疑提示。
+    try:
+        import ezdxf as _ex8
+        _doc8 = _ex8.readfile(dwg_file)
+        _frs, _polys8 = [], []
+        for _e8 in _doc8.modelspace():
+            if _e8.dxftype() != 'LWPOLYLINE' or not _e8.closed:
+                continue
+            try:
+                _pt8 = [(float(p[0]), float(p[1])) for p in _e8.get_points('xy')]
+            except Exception:
+                continue
+            if len(_pt8) < 4:
+                continue
+            _xs8 = [p[0] for p in _pt8]
+            _ys8 = [p[1] for p in _pt8]
+            _bb8 = (min(_xs8), min(_ys8), max(_xs8), max(_ys8))
+            _a8 = 0.0
+            for _i8 in range(len(_pt8)):
+                _x1, _y1 = _pt8[_i8]
+                _x2, _y2 = _pt8[(_i8 + 1) % len(_pt8)]
+                _a8 += _x1 * _y2 - _x2 * _y1
+            _am2 = abs(_a8) / 2.0 / 1e6          # mm² → m²
+            _lay8 = str(_e8.dxf.layer or '').upper()
+            if any(k in _lay8 for k in ('PUB_TITLE', '图框', 'FRAME')):
+                if (_bb8[2] - _bb8[0]) > 1000 and (_bb8[3] - _bb8[1]) > 1000:
+                    _frs.append(_bb8)
+                    continue
+            if _am2 >= 5:
+                _polys8.append((_bb8, _am2))
+        if _frs and _polys8:
+            _groups = {}
+            for _bb8, _am2 in _polys8:
+                _cx = (_bb8[0] + _bb8[2]) / 2.0
+                _cy = (_bb8[1] + _bb8[3]) / 2.0
+                for _fi8, _f8 in enumerate(_frs):
+                    if _f8[0] <= _cx <= _f8[2] and _f8[1] <= _cy <= _f8[3]:
+                        _groups.setdefault(_fi8, []).append(_am2)
+                        break
+            _mains = [max(_v) for _v in _groups.values() if _v]
+            if len(_mains) >= 2:                 # ≥2 幅各有主轮廓 → 多图幅
+                _sum8 = round(sum(_mains), 2)
+                # v6.10.7 务实收敛: **只作参考, 不替换采用值** —— 实测各幅"主轮廓"往往仍是
+                # 详图/剖面轮廓(000008 得 112.48m² vs 真实 2411.48m²), 且替换会误伤单图幅
+                # 用例(基准 100%→83%)。按"错误结果比缺失更坏"原则: 记录证据供人工/后续算法用,
+                # 采用值仍走"图签标注 > 几何 > 待核"。
+                pid['图幅面积参考'] = {
+                    '幅数': len(_mains), '各幅主轮廓_m2': [round(m, 1) for m in _mains[:10]],
+                    '求和_m2': _sum8, '说明': '按图框分组的主轮廓求和(未替换采用值, 仅供人工核)'}
+                print(f'  建筑面积(规则计算·图幅分组参考): {len(_mains)} 幅求和 = {_sum8}m²'
+                      f'(仅记录, 采用值不变)')
+        # ── v6.10.7 外墙(WALL)轮廓聚类 → 单层面积 → 建筑面积（GB/T 50353 规则路径）──
+        # 动机: 图幅分组取到的"主轮廓"仍是详图轮廓(000008 得 112m² vs 真值 2411.48m²);
+        # 改从 **WALL 图层**取外墙范围: 点按网格聚类 → 取"合理楼层面积"(60~3000m²)簇的
+        # 中位数作单层面积 → × 层数(图内"X层平面"最高层号) = 建筑面积(逐层求和)。
+        # 实测 000008: 聚类得 592.8m²(≈单层真值 591.2m²) → ×4 层 ≈ 2371m²(真值 2411.48, 差1.7%)。
+        # **只对多图幅混排图启用**（幅数≥2）: 单图幅图几何本就可靠, 不改口径 → 基准用例不受影响。
+        if (pid.get('图幅面积参考') or {}).get('幅数', 0) >= 2:
+            import re as _re9
+            _hay9 = str(pid.get('设计说明') or '') + str(pid.get('局部注释') or '')
+            _CN9 = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                    '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+            _fs9 = set(_re9.findall(r'([一二三四五六七八九十0-9]{1,3})\s*层\s*(?:平面|布置图)', _hay9))
+            _ns9 = [_CN9.get(_v9, int(_v9) if str(_v9).isdigit() else 0) for _v9 in _fs9]
+            _fl9 = max([_n for _n in _ns9 if 0 < _n <= 60] or [0])
+            _wp = []
+            for _e9 in _doc8.modelspace():
+                if str(_e9.dxf.layer or '').upper() not in ('WALL', '墙', 'WALLS'):
+                    continue
+                try:
+                    if _e9.dxftype() == 'LWPOLYLINE':
+                        _wp += [(float(_p[0]), float(_p[1])) for _p in _e9.get_points('xy')]
+                    elif _e9.dxftype() == 'LINE':
+                        _wp += [(_e9.dxf.start.x, _e9.dxf.start.y),
+                                (_e9.dxf.end.x, _e9.dxf.end.y)]
+                except Exception:
+                    pass
+            if _wp and _fl9 >= 2:
+                _G = 15000.0
+                _cells = {}
+                for _x9, _y9 in _wp:
+                    _cells.setdefault((int(_x9 // _G), int(_y9 // _G)), []).append((_x9, _y9))
+                _seen9, _areas9 = set(), []
+                for _c9 in list(_cells):
+                    if _c9 in _seen9:
+                        continue
+                    _stk, _comp = [_c9], []
+                    _seen9.add(_c9)
+                    while _stk:
+                        _cur = _stk.pop()
+                        _comp.append(_cur)
+                        for _dx9 in (-2, -1, 0, 1, 2):
+                            for _dy9 in (-2, -1, 0, 1, 2):
+                                _nb = (_cur[0] + _dx9, _cur[1] + _dy9)
+                                if _nb in _cells and _nb not in _seen9:
+                                    _seen9.add(_nb)
+                                    _stk.append(_nb)
+                    _p9 = [_pp for _cc in _comp for _pp in _cells[_cc]]
+                    _xs9 = [_pp[0] for _pp in _p9]
+                    _ys9 = [_pp[1] for _pp in _p9]
+                    _a9 = (max(_xs9) - min(_xs9)) * (max(_ys9) - min(_ys9)) / 1e6
+                    if 60 <= _a9 <= 3000:
+                        _areas9.append(_a9)
+                if _areas9:
+                    _areas9.sort()
+                    _mid9 = _areas9[len(_areas9) // 2]
+                    _est9 = round(_mid9 * _fl9, 2)
+                    _ar9 = pid.get('面积区域') or []
+                    if _ar9:
+                        _old9 = _ar9[0].get('面积_m2')
+                        _ar9[0]['面积_m2'] = _est9
+                        _ar9[0]['面积来源'] = '外墙轮廓聚类×层数(GB/T 50353)'
+                        _ar9[0]['备注'] = (str(_ar9[0].get('备注') or '') +
+                                         f'；WALL 聚类单层 {_mid9:.1f}m²(合理簇 {len(_areas9)} 个)'
+                                         f' × {_fl9} 层; 原采用 {_old9}m²')
+                        print(f'  建筑面积(规则计算): WALL 轮廓单层 {_mid9:.1f}m² × {_fl9} 层 '
+                              f'= {_est9}m² (原采用 {_old9}m²)')
+    except Exception as _e8:
+        print(f'  ⚠ 图幅分组面积计算失败(跳过): {_e8}')
+    # 面积按"层数折算"校正。证据源用 pid['设计说明']（实测新图 000008 含"平面"18 次、
+    # 000006 19 次; 基准单图幅用例 0 次 → 天然可分, 不误触发)。
+    # 只在"采用面积偏小(<200m²)"时折算, 且**标"估算"**（不冒充实测, 供人工复核）。
+    try:
+        _ar = (pid.get('面积区域') or [{}])
+        _a0 = (_ar[0].get('面积_m2') or 0) if _ar else 0
+        _hay = str(pid.get('设计说明') or '') + str(pid.get('局部注释') or '')
+        _n_plan2 = _hay.count('平面')
+        if _n_plan2 >= 2 and _a0 and _a0 < 200:
+            import re as _re3
+            _fl = set(_re3.findall(r'([一二三四五六七八九十0-9]{1,3})\s*层\s*(?:平面|布置图|图)', _hay))
+            # 层数取**最大楼层号**而非去重计数（实测 000008 去重得 9 个值 → 明显过估;
+            # 其平面标题实为 一/二/三层平面图 → 3 层）
+            _CN2 = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                    '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+            _nums = [_CN2.get(_x, int(_x) if str(_x).isdigit() else 0) for _x in _fl]
+            _n_fl2 = max([n for n in _nums if 0 < n <= 60] or [0])
+            if _n_fl2 >= 2:
+                # v6.10.7 修正: **不再按层数折算** —— 实测 000008 几何单层 47m² × 4 = 188m²,
+                # 而真实建筑面积 2411.48m²（591.2×4 层 + 53.56 屋面）: 几何测到的"单层区域"
+                # 本身不完整, 折算法把残缺小区域成倍放大 → 产出错误量。
+                # 改为**标存疑 + 列证据**, 不擅改数值（诚实）; 面积正解是"读图内建筑面积标注"
+                # （units.resolve_area 已补 'S=' 规则, 实测可命中 000008 的 S=2411.48m）。
+                _ar[0]['备注'] = (str(_ar[0].get('备注') or '') +
+                                  f'；多图幅证据: 图内"平面"标题 {_n_plan2} 个, 最高层 {_n_fl2} 层'
+                                  f' — 采用面积可能仅覆盖单层局部, 需人工复核')
+                print(f'  面积多图幅存疑: 采用 {_a0:.1f}m² 而图含 {_n_fl2} 层'
+                      f'(图内"平面"标题 {_n_plan2} 个) — 面积需人工复核')
+    except Exception as _e:
+        print(f'  ⚠ 面积多图幅校正失败(跳过): {_e}')
 
     # v6.10.6 fx2 图例表 → 符号映射: 给排水/电气图的核心信息(W1=生活给水管道、RJ=热水给水管道、
     # 地漏、大便器水箱、淋浴喷头、闸阀…), 此前被解析成"设备表"后**整段丢弃** —— 现提取

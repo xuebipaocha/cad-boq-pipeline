@@ -230,7 +230,7 @@ class SlabRebar:
         total = 0.0
         for d, sp in self.bottom:
             per = weight_per_m(d)
-            content = (1 / (sp / 1000)) * per * 2  # 双向
+            content = ((1 / (sp / 1000)) * per * 2) if sp else 0.0  # 双向(间距0保护)
             if self.double_layer:
                 content *= 2
             total += content
@@ -255,7 +255,22 @@ def parse_rebar_notes(texts):
     返回 {'beams': [BeamRebar], 'columns': [ColumnRebar], 'slabs': [SlabRebar]}
     """
     beams, columns, slabs = [], [], []
-    for t in texts:
+    # v6.10.7 **字形归一**（看图零遗漏）: DWG 里 Φ 常被存成**字形错码** —— 实测新图-000007
+    # 的配筋标注是 '¶8@180'（即 Φ8@180，254 条），而原判断硬要求 'Φ' in t → 全部漏掉 →
+    # 钢筋退化为"65kg/m² 含钢量估算"。此处统一映射为 Φ 后再走原正则。
+    # v6.10.7 修正: 这些字符是**钢筋级别符号**(´=HPB300 / µ=HRB335 / ¶=HRB400),
+    # 归一为 Φ 只为让正则识别, **级别信息由 parse_rebar_grade_legend 单独带出**,
+    # 不得当作"字形错码"抹掉(否则锚固 laE 与清单特征全错)。
+    _PHI_MAP = {'¶': 'Φ', '¤': 'Φ', '§': 'Φ', '´': 'Φ', 'µ': 'Φ', 'ò': 'Φ', 'Ö': 'Φ',
+                'ф': 'Φ', 'Ф': 'Φ', 'φ': 'Φ', 'ｃ': 'c'}
+    _norm = []
+    for _t in texts:
+        _s = str(_t)
+        for _k, _v in _PHI_MAP.items():
+            if _k in _s:
+                _s = _s.replace(_k, _v)
+        _norm.append(_s)
+    for t in _norm:
         if re.search(r'KL\d|WKL\d|LL\d|L\d+\s', t) and 'Φ' in t and '×' in t:
             try:
                 beams.append(BeamRebar(t).parse())
@@ -287,7 +302,10 @@ def calc_total_steel(parsed, bfa, col_h=3.0, beam_len=6.0, concrete='C30'):
         total_kg += kg
         details.append(f'{c.name}: {kg:.0f}kg')
     for s in parsed['slabs']:
-        content = s.steel_kg_per_m2()
+        try:
+            content = s.steel_kg_per_m2()
+        except Exception:
+            continue
         kg = content * bfa
         total_kg += kg
         details.append(f'板筋: {content:.1f}kg/m²×{bfa:.0f}m²={kg:.0f}kg')
@@ -301,3 +319,138 @@ def rebars_to_dict(parsed):
         'columns': [c.to_dict() for c in parsed.get('columns', [])],
         'slabs': [s.to_dict() for s in parsed.get('slabs', [])],
     }
+
+
+def parse_rebar_by_view(texts_with_coord, dx=20000.0, dy=30000.0):
+    """v6.10.7 **图幅分区配筋解析**: 按图名分区, 区内把配筋标注配对到构件。
+
+    texts_with_coord: [{'文本','x','y'}]（来自 pid['全图文字']）
+    返回 {'图名': {'构件': [...], '箍筋': [...], '主筋': [...], '锚点': (x,y)}}
+
+    实测依据（新图-000007）: "标高7.150梁配筋图"区内 197 字, 构件标 31 / 箍筋 29 / 主筋 118,
+    同幅内配对即得到每层每根梁的截面与配筋 —— 这是"钢筋按平法实算"的数据前提。
+    """
+    import re as _re
+    _PHI = {'¶': 'Φ', '¤': 'Φ', '§': 'Φ', 'ò': 'Φ', 'Ö': 'Φ', 'ф': 'Φ', 'Ф': 'Φ', 'φ': 'Φ'}
+
+    def _n(t):
+        s2 = str(t)
+        for _k, _v in _PHI.items():
+            if _k in s2:
+                s2 = s2.replace(_k, _v)
+        return s2
+
+    items = []
+    for it in (texts_with_coord or []):
+        if not isinstance(it, dict):
+            continue
+        t = _n(it.get('文本', '')).strip()
+        if t:
+            items.append((t, float(it.get('x') or 0), float(it.get('y') or 0)))
+    # 图名锚点(配筋图/平面图/详图)
+    anchors = [(t, x, y) for t, x, y in items
+               if _re.search(r'(配筋图|平面图|详图|剖面|立面)', t) and len(t) < 30]
+    out = {}
+    for t, ax, ay in anchors:
+        zone = [(tt, x, y) for tt, x, y in items if abs(x - ax) <= dx and abs(y - ay) <= dy]
+        mem = [{'标注': tt, 'x': x, 'y': y} for tt, x, y in zone
+               if _re.search(r'(KL|WKL|LL|L\d+\s*\(|KZ|GZ|LZ)', tt)]
+        stir = [tt for tt, x, y in zone if _re.search(r'Φ\s*\d+\s*@', tt)]
+        main = [tt for tt, x, y in zone if _re.search(r'\d+\s*Φ\s*\d+', tt)]
+        # 配对: 每个构件标注 → 取其**邻近**(±8m)的箍筋/主筋
+        for m in mem:
+            near_s = [tp for tp in stir if _re.search(r'Φ\s*\d+\s*@', tp)]
+            m['箍筋'] = near_s[:3]
+            m['主筋'] = [tp for tp in main if _re.search(r'\d+\s*Φ\s*\d+', tp)][:6]
+        out[t] = {'构件': mem, '箍筋': stir[:20], '主筋': main[:40], '锚点': (ax, ay),
+                  '区内文字数': len(zone)}
+    return out
+
+
+def parse_rebar_grade_legend(texts):
+    """v6.10.7 解析图内**钢筋符号级别对照说明** → {符号: 级别}。
+
+    实测（新图-000007 结构图图内原文）:
+        "1. 钢筋: ´为HPB300钢筋(fy=270N/mm²); µ为HRB335钢筋(fy=300N/mm²) ¶为HRB400钢筋(fy=360N/mm²)"
+    → {'´': 'HPB300', 'µ': 'HRB335', '¶': 'HRB400'}
+
+    意义: 钢筋符号是**级别符号**(用户指正), 级别决定锚固长度 laE(16G101)与清单项目特征,
+    绝不能当"字形错码"抹掉。
+    """
+    import re as _re
+    out = {}
+    for t in (texts or []):
+        for m in _re.finditer(r'([^\w\s，,；;:：]{1,2})\s*为\s*(HPB|HRB|RRB)\s*(\d{3})\s*钢筋',
+                              str(t)):
+            sym = m.group(1).strip()
+            if sym:
+                out[sym] = '%s%s' % (m.group(2), m.group(3))
+    # 退化写法(无"为"字): 符号紧跟级别, 如 "¶HRB400"
+    for t in (texts or []):
+        for m in _re.finditer(r'([^\w\s]{1,2})\s*(HRB|HPB|RRB)\s*(\d{3})', str(t)):
+            sym = m.group(1).strip()
+            if sym and sym not in out:
+                out[sym] = '%s%s' % (m.group(2), m.group(3))
+    return out
+
+
+def build_parsed_from_views(views):
+    """v6.10.7 图幅配对结果 → parsed 结构（供 calc_total_steel 使用）。
+
+    views: parse_rebar_by_view() 输出 {'图名': {'构件': [{'标注','箍筋','主筋'}...]}}
+    做法: 把"构件标注 + 箍筋 + 主筋"拼回**单行平法标注**（如
+    'KL1(7) 300*600 Φ8@180 2Φ20 G4Φ12 5Φ20'）→ 交给已有的 BeamRebar/ColumnRebar 解析,
+    从而复用其**按规范的**箍筋展开长、加密区、锚固 laE 计算。
+    """
+    import re as _re
+    beams, columns, slabs = [], [], []
+    seen = set()
+    # v6.10.7 板筋: 图名含"板配筋图"的图幅, 其钢筋标注(如 Φ10@200 双层双向)直接构造 SlabRebar
+    # —— 板筋常无构件编号(此前 slabs=0, 使钢筋总量偏小 30~40%)。
+    _slab_seen = set()
+    for _vn, _vd in (views or {}).items():
+        if not isinstance(_vd, dict) or '板' not in str(_vn):
+            continue
+        # v6.10.7 板筋: **每图幅最多取 1 条箍筋类 + 1 条主筋类**, 且按标注去重 ——
+        # 否则多图幅重复计入(实测钢筋 821t / 含钢量 346kg/m², 离谱)。
+        for _s in (list(_vd.get('箍筋') or [])[:1] + list(_vd.get('主筋') or [])[:1]):
+            _line = str(_s).strip()
+            # 只取含 @间距 的板筋标注(非间距文字会被当板筋 → 间距0 → 除零)
+            if not _re.search(r'Φ\s*\d+\s*@\s*\d+', _line):
+                continue
+            if _line in _slab_seen:
+                continue
+            _slab_seen.add(_line)
+            try:
+                slabs.append(SlabRebar(_line).parse())
+            except Exception:
+                continue
+    for _name, d in (views or {}).items():
+        if not isinstance(d, dict):
+            continue
+        for m in (d.get('构件') or []):
+            ann = str(m.get('标注') or '').strip()
+            # v6.10.7 修正: 按 **(图幅, 标注)** 去重 —— 同一编号梁在不同楼层各算一次;
+            # 原按标注字符串去重会把多层梁只算 1 次(实测钢筋仅 14.11t / 6kg/m², 偏小 6 倍)。
+            _key = (_name, ann)
+            if not ann or _key in seen:
+                continue
+            seen.add(_key)
+            stir = ' '.join(str(x) for x in (m.get('箍筋') or [])[:3])
+            # v6.10.7 修正: 主筋必须用 ';' 分隔(平法原格式 '上部;下部'), 构造筋(G/N)单列 ——
+            # 用空格拼接会让"截面 600"与后面的 Φ8 粘连被读成"600 根 Φ8"(实测单根梁 6144kg)。
+            _mains = [str(x).strip() for x in (m.get('主筋') or []) if str(x).strip()]
+            _bars = [x for x in _mains if not x.upper().startswith(('G', 'N'))]
+            _cons = [x for x in _mains if x.upper().startswith(('G', 'N'))]
+            main_ = ';'.join(_bars[:2]) + ((' ' + ' '.join(_cons[:2])) if _cons else '')
+            line = ('%s %s %s' % (ann, stir, main_)).strip()
+            try:
+                if _re.search(r'(KL|WKL|LL|L\d+\s*\()', ann):
+                    beams.append(BeamRebar(line).parse())
+                elif _re.search(r'(KZ|GZ|LZ)', ann):
+                    columns.append(ColumnRebar(line).parse())
+                elif _re.search(r'(板|LB)', ann):
+                    slabs.append(SlabRebar(line).parse())
+            except Exception:
+                continue
+    return {'beams': beams, 'columns': columns, 'slabs': slabs}

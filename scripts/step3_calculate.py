@@ -288,9 +288,32 @@ def calculate(drawing_data):
     if specialty == '房屋建筑与装饰工程' and drawing_data.get('工程性质') == '改造':
         try:
             from calc_renovation import calc as calc_renovation
+            _reno = calc_renovation(drawing_data)
+            # v6.10.7 **改造分支补结构构件算量**: 改造项目的结构图同样要算柱/梁/板混凝土与模板。
+            # 实测教训(000007 结构图): 柱几何模型 91 根/810×903 已建成, 但因工程性质判"改造"
+            # → 走本分支直接 return → **结构量全空**。现按 GB/T 50854 规则补算, 只并入
+            # 结构类分项(混凝土/模板/钢筋), 不混入新建模板的土方/场地平整等。
+            _cm2 = drawing_data.get('构件模型') or {}
+            if any(_cm2.get(k) for k in ('柱', '梁', '板', '墙')):
+                try:
+                    from calc_building import calc as _cb_calc
+                    _names = {str(x.get('分项名称')) for x in _reno}
+                    for _s in (_cb_calc(drawing_data) or []):
+                        _n2 = str(_s.get('分项名称'))
+                        if _n2 in _names:
+                            continue
+                        if any(_k in _n2 for _k in ('混凝土', '模板', '钢筋')):
+                            _s['备注'] = ((str(_s.get('备注') or '') + '；') +
+                                        '改造项目结构构件(按计算规则补算)')
+                            _reno.append(_s)
+                            _names.add(_n2)
+                except Exception as _e2:
+                    import traceback as _tb2
+                    print(f'  结构构件算量跳过: {_e2}')
+                    print('  ' + _tb2.format_exc().strip().split('\n')[-3:][0].strip())
             return _attach_basis(drawing_data, _apply_scope_mask(
                 drawing_data, _attach_extended_entities(
-                    drawing_data, calc_renovation(drawing_data))))
+                    drawing_data, _reno)))
         except Exception as e:
             print(f'  大修计算器跳过: {e}')
             # 回退到常规路径
