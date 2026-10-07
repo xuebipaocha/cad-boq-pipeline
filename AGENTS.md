@@ -117,6 +117,16 @@
 - **错误结果比缺失更坏**：无证据不编造，标"待提取/待核实"；知识库无来源不写入；估算量不与实测混列
 - git：全局代理 `127.0.0.1:40475` 失效 → 用 `git -c http.proxy= -c https.proxy= push origin main`（origin 双 URL = gitee + github）；github 偶发 443 超时，重试即可
 - 记忆载体：`memory:remember` 不可用 → 会话记忆统一落 AGENTS.md（本文件与 `cad-boq-pipeline/AGENTS.md` 双份同步）
+- **图纸保密（用户 2026-10-07 明确要求）**：**`*.dwg` / `*.dxf` 一律不入仓库**（`.gitignore` 已忽略），
+  远端仓库**不得含任何图纸**；图纸只留本地。`benchmarks/cases/**` 的样本图与 `test_data/*.dxf` 均属此列。
+- **图纸撤回操作留档（2026-10-07 已执行）**：`git filter-branch --force --index-filter "git rm -r --cached
+  --ignore-unmatch -- '*.dwg' '*.dxf'" --tag-name-filter cat -- --all` → `reflog expire` + `gc --prune=now`
+  → `push --force` 双端。**`.git` 129M → 77M**，远端树已无图纸（hash `8ce792e`）。
+  备份在 `%LOCALAPPDATA%\Temp\git-backup-before-purge`。
+  ⚠️ **踩坑**：`filter-branch` 会**同步工作区**、把被移除的已跟踪文件**从工作区删掉**（79 个图纸一度丢失）；
+  恢复方法：`git --git-dir=<备份> ls-tree -r -z HEAD`（`-z` 取原始字节路径，避免中文转义）+ `git cat-file -p`
+  → 写回工作区（一次性脚本 `scripts/tools/_restore_drawings.py`，用后即删）。
+  ⚠️ **残留风险**：强制推送后，远端**旧对象可能短期内仍可经旧 SHA 访问**；若要绝对保密需删库重建。
 
 ## 遗留（数据缺失类，非能力缺口）
 
