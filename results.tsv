@@ -1,2 +1,4 @@
 round	skill	dim	change	paired_votes	status	note
 1	cad-boq-pipeline	dim3	补"失败模式与降级路径"章节（11 行 如果→则→不要 表 + 恢复留痕铁律）	3:better/clear	keep	dim3 3→9 预估；judge 一致认为其余维度无退化
+2	cad-boq-pipeline	dim4+dim6+dim7	检查点显性化（4 个 🔴 CHECKPOINT）+ 补 PRINCIPLES.md 引用 + 版本记录归档去冗余	3:better/clear	keep	judge 一致：dim4 从无到有、dim6 引用可达、dim7 减冗余
+3	cad-boq-pipeline	dim2+dim5	五步流水线输入/输出表 + 识图结果.json 关键字段清单	待评	待评	第 3 轮待 paired 评审
