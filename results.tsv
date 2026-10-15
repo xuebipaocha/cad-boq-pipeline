@@ -1,5 +1,7 @@
 timestamp	commit	skill	old_score	new_score	status	dimension	note	eval_mode
-2026-10-15T22:54	baseline	cad-boq-pipeline	-	43.3	baseline	-	结构评分 dim1-7/9（dim8 实测未做，标 dry_run）	dry_run
+2026-10-15T22:54	baseline	cad-boq-pipeline	-	43.3	baseline	-	结构评分 dim1-7/9（dim8 未测）	dry_run
 2026-10-15T22:58	22ddb6d	cad-boq-pipeline	43.3	3-0 better	keep	dim3 失败模式编码	新增"失败模式与降级路径"章节（11 行 如果→则→不要 表 + 恢复留痕铁律）	paired
 2026-10-15T23:03	d27dfb7	cad-boq-pipeline	3-0 better	3-0 better	keep	dim4+dim6+dim7	4 个 🔴 CHECKPOINT 显性化 + 补 PRINCIPLES.md 引用 + 版本记录归档去冗余	paired
 2026-10-15T23:08	b92ef09	cad-boq-pipeline	3-0 better	3-0 better (1 clear + 2 slight)	keep	dim2+dim5	五步流水线"输入→输出"表 + 识图结果.json 关键字段契约	paired
+2026-10-15T23:12	baseline	darwin-dim8	cad-boq-pipeline	-	7.0 (1胜2负)	baseline	dim8 实测	3 题盲评：无门窗表 A胜 / 改造范围 B胜 / 定额缺项 B胜(clear) —— 根因：SKILL.md 组价链漏"换"层、判断类过于自信	full_test
+2026-10-15T23:20	3129c1b	cad-boq-pipeline	7.0 (1胜2负)	≈9.0 (3 题均达/超)	keep	dim8 实测	定额四步链补"换"层（不得跳步）+ 项目内规则索引（判断类先查规则文件）→ 三题全部达到或超过 baseline	full_test
