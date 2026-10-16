@@ -187,6 +187,13 @@ document.getElementById('ex').oninput = e=>{
 };
 addEventListener('resize', ()=>{ cam.aspect=innerWidth/innerHeight; cam.updateProjectionMatrix();
   rend.setSize(innerWidth,innerHeight); });
+// ★ 离线兜底：Three.js 走 unpkg CDN，若不可达（实测本机 ERR_CONNECTION_CLOSED）→ 明确提示改用
+//   零依赖的 Canvas 版模型（由 export_3d_html.py 生成，本机可用）。
+addEventListener('error', () => {
+  const el = document.getElementById('err');
+  if (el) { el.style.display = 'block';
+    el.textContent = '三维库加载失败（CDN 不可达）→ 请改用零依赖的 Canvas 版模型（export_3d_html.py 生成）'; }
+}, true);
 (function loop(){ requestAnimationFrame(loop); ctl.update(); rend.render(scene,cam); })();
 </script></body></html>'''
 
@@ -254,7 +261,10 @@ def build(dxf_path, title=''):
             b['x'] -= ox
             b['y'] -= oy
     name = title or os.path.splitext(os.path.basename(dxf_path))[0]
-    meta = {'名称': name, '说明': '按图层语义 + 线段几何重建（已排除详图区）；共 %d 段' % len(boxes)}
+    meta = {'名称': name,
+            '说明': ('按图层语义 + 线段几何重建（已排除详图区）；共 %d 段。'
+                     '※ 口径分离：本模型为可视化口径；工程量按定额规则不扣洞口（见 PRINCIPLES.md 第 3 节）。'
+                     % len(boxes))}
     return (HTML.replace('__TITLE__', name)
             .replace('__BOXES__', json.dumps(boxes, ensure_ascii=False))
             .replace('__META__', json.dumps(meta, ensure_ascii=False))), boxes, meta

@@ -411,6 +411,8 @@ def choose_area(result, insunits=4):
             _second = _srt[-2] if len(_srt) >= 2 else 0
             if _second > 0:
                 _pa = [p for p in _pa if (p.get('area_m2') or 0) <= _second * 8.0]
+        # v6.10.13 修正: `text_clusters` 可能为空(实测 261012 该图为 0 个文字簇),
+        # 故补一条来自 `全图文字`(含 x/y 坐标)的图名锚点通道。
         _pt = []
         for _c in (result.get('text_clusters') or []):
             _t = str(_c.get('text', ''))
@@ -418,6 +420,13 @@ def choose_area(result, insunits=4):
                 _xy = _c.get('pos') or _c.get('center') or _c.get('xy')
                 if _xy and len(_xy) >= 2:
                     _pt.append((_t, float(_xy[0]), float(_xy[1])))
+        if not _pt:
+            for _c in (result.get('全图文字') or []):
+                _t = str(_c.get('文本') or '')
+                if ('平面图' in _t or '布置图' in _t) and len(_t) < 30:
+                    _x, _y = _c.get('x'), _c.get('y')
+                    if _x is not None and _y is not None:
+                        _pt.append((_t, float(_x), float(_y)))
         if _pt:
             _keep = []
             for _p in _pa:
