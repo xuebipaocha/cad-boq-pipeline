@@ -188,6 +188,17 @@ def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
                     continue
 
     _walk_texts(msp)
+    # ①.5 v6.10.12 **按图名区统计规格**（规格集中标注 → 逐构件就近匹配几乎全失败，
+    # 故以图名区为边界：同区构件用该区出现的最高频规格）
+    _zone_specs = {}
+    for _txt, _tx, _ty, _k, _pr in tag_texts:
+        _zn = _zone(_tx, _ty)
+        if not _zn:
+            continue
+        _d = _zone_specs.setdefault(_zn, {})
+        _d[_txt] = _d.get(_txt, 0) + 1
+    _zone_default = {zn: max(d.items(), key=lambda x: x[1])[0] for zn, d in _zone_specs.items()}
+
     # ② 按图层收集几何
     by_cat = defaultdict(lambda: defaultdict(lambda: {'length_mm': 0.0, 'count': 0,
                                                       'spec_hits': defaultdict(float)}))
@@ -224,6 +235,10 @@ def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
                     best = (d, txt)
             if best:
                 spec = best[1]
+        if not spec and p:
+            _zn2 = _zone(p[0], p[1])
+            if _zn2 and _zone_default.get(_zn2):
+                spec = _zone_default[_zn2]          # 本图名区最高频规格
         key = spec or ('（%s默认）' % DEFAULT_SPEC.get(form, ('未知', 0))[0])
         d = by_cat[cat][key]
         d['length_mm'] += L

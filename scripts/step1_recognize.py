@@ -401,6 +401,43 @@ def choose_area(result, insunits=4):
     # v4.3: 0层图框排除(面积显著大于其他轮廓)
     all_areas = [p.get('area_m2', 0) for p in poly_areas]
     poly_areas = [p for p in poly_areas if not is_frame_poly(p.get('area_m2', 0), p.get('layer', ''), all_areas)]
+    # v6.10.11 **图名分区 + 巨值排除**（用户经验：严禁拿最大闭合多段线当建筑面积）
+    # 实测 261012：图集式多图框图纸里详图/图框区闭合区达 120182.8 m²，而真实建筑外轮廓
+    # 只在"一层平面图"区（2494.8 m²）。故先剔巨值/离群，再按"平面图"标题就近归属。
+    try:
+        _pa = [p for p in poly_areas if (p.get('area_m2') or 0) <= 50000.0]
+        if len(_pa) >= 2:
+            _srt = sorted((p.get('area_m2') or 0) for p in _pa)
+            _second = _srt[-2] if len(_srt) >= 2 else 0
+            if _second > 0:
+                _pa = [p for p in _pa if (p.get('area_m2') or 0) <= _second * 8.0]
+        _pt = []
+        for _c in (result.get('text_clusters') or []):
+            _t = str(_c.get('text', ''))
+            if ('平面图' in _t or '布置图' in _t) and len(_t) < 30:
+                _xy = _c.get('pos') or _c.get('center') or _c.get('xy')
+                if _xy and len(_xy) >= 2:
+                    _pt.append((_t, float(_xy[0]), float(_xy[1])))
+        if _pt:
+            _keep = []
+            for _p in _pa:
+                _cx = _p.get('cx', _p.get('center_x'))
+                _cy = _p.get('cy', _p.get('center_y'))
+                if _cx is None or _cy is None:
+                    _keep.append(_p)
+                    continue
+                _bd = min((float(_cx) - tx) ** 2 + (float(_cy) - ty) ** 2 for _, tx, ty in _pt)
+                if _bd <= (20000.0 ** 2):          # 20 m 内视为归属某一"平面图"区
+                    _keep.append(_p)
+            if _keep:
+                _pa = _keep
+                notes.append('面积按"平面图/布置图"图名分区选取（已排除详图/图框区巨值）')
+        if _pa and len(_pa) < len(poly_areas):
+            notes.append('面积候选由 %d 个过滤为 %d 个' % (len(poly_areas), len(_pa)))
+        if _pa:
+            poly_areas = _pa
+    except Exception:
+        pass
     area, source, notes = resolve_area(text_area, poly_areas, [], insunits)
     if not area and text_area:
         area, source = text_area, '文字面积标注'
@@ -730,6 +767,10 @@ def run(dwg_file, output_dir):
         '工程性质证据': nature_detail,
         '图纸元数据': {'单位': result.get('metadata',{}).get('unit','mm'), 'insunits': insunits, '实体总数': result.get('metadata',{}).get('entity_total',0),
                       **(_extract_title_block_pid(dwg_file) if 'dwg_file' in dir() else {})},  # v6.3 C2: 图签(图名/图号/比例)
+        # v6.10.11 修复: 建筑面积_m2 此前从未写入(只写了面积区域),
+        # 下游 calc_building / 含钢量 / 单方指标 全取 None —— 7 图面积全缺的真根因。
+        '建筑面积_m2': (round(total_area, 2) if total_area else None),
+        '面积来源': area_source,
         '面积区域': [{'名称':'主区域','面积_m2':round(total_area,2),'周长_m':round(perimeter,2),'面积来源':area_source}] if total_area else [],
         '构造层': construction_layers,
         '线性构件': [],
