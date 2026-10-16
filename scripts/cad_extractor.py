@@ -168,9 +168,25 @@ def extract_pipe_lengths(doc, msp, insunits=4):
                 else:
                     total_len += lay_m
                     if lay not in pipes_by_layer:
-                        pipes_by_layer[lay] = {'长度_m': 0, '段数': 0}
+                        pipes_by_layer[lay] = {'长度_m': 0, '段数': 0, 'pts': []}
                     pipes_by_layer[lay]['长度_m'] += lay_m
                     pipes_by_layer[lay]['段数'] += 1
+                    # v6.10.15 采样代表点（供"图层名无管径时就近匹配管径文字"）
+                    try:
+                        if len(pipes_by_layer[lay]['pts']) < 40:
+                            _dt = e.dxftype()
+                            if _dt == 'LINE':
+                                _px = (e.dxf.start.x + e.dxf.end.x) / 2.0
+                                _py = (e.dxf.start.y + e.dxf.end.y) / 2.0
+                                pipes_by_layer[lay]['pts'].append((_px, _py))
+                            elif _dt == 'LWPOLYLINE':
+                                _pp = list(e.get_points('xy'))
+                                if _pp:
+                                    pipes_by_layer[lay]['pts'].append(
+                                        (sum(q[0] for q in _pp) / len(_pp),
+                                         sum(q[1] for q in _pp) / len(_pp)))
+                    except Exception:
+                        pass
         except:
             continue
 
@@ -190,10 +206,34 @@ def extract_pipe_lengths(doc, msp, insunits=4):
                   'VPIPE': '采暖', '暖': '采暖', '供热': '采暖',
                   '排风': '通风', '送风': '通风', '新风': '通风', 'DUCT': '通风', '风管': '通风'}
     _VALVE_LAYERS = ('VALVE', '阀')  # 阀门层(不计入管道长度, 单独按个数)
+    # v6.10.15 管径文字池（供"图层名无管径"时就近匹配）——
+    # 实测 261012 管径写在 TEXT 里（DN50/DN65/DN80/DN100/DN125/DN150…），而原实现只查图层名。
+    _dia_texts = []
+    try:
+        for _e in msp.query('TEXT'):
+            _t = str(_e.dxf.text or '').strip()
+            if not _t:
+                continue
+            _m2 = diameter_pattern.search(_t)
+            if _m2:
+                _dia_texts.append((_m2.group(0).upper(), _e.dxf.insert.x, _e.dxf.insert.y))
+    except Exception:
+        _dia_texts = []
+
     pipes_by_diameter = {}
     for lay, info in pipes_by_layer.items():
         m = diameter_pattern.search(lay)
-        dia = m.group(0).upper() if m else '未标管径'
+        dia = m.group(0).upper() if m else None
+        if dia is None and _dia_texts:
+            # 就近匹配（容差 5 m）：取该层管道代表点附近最近的管径文字
+            _best, _bd = None, 5000.0
+            for _px, _py in (info.get('pts') or []):
+                for _dtxt, _tx, _ty in _dia_texts:
+                    _d = ((_px - _tx) ** 2 + (_py - _ty) ** 2) ** 0.5
+                    if _d < _bd:
+                        _bd, _best = _d, _dtxt
+            dia = _best
+        dia = dia or '未标管径'
         system = '未知系统'
         for kw, sys in system_map.items():
             if kw in lay:

@@ -266,8 +266,38 @@ def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
             summary['总重_t'] += wt
             summary['构件数'] += d['count']
             summary['长度合计_m'] += Lm
+    # v6.10.15 螺栓/锚栓**算重**（原先仅计数、重量恒 0）：
+    # 从图内文字提取 `nMm`（数量+规格，实测 261012 有 '4M24' 多处）→ 规格单重 × 数量。
+    _BOLT_KG = {'M12': 0.13, 'M16': 0.20, 'M20': 0.36, 'M22': 0.48,
+                'M24': 0.60, 'M27': 0.85, 'M30': 1.10}
+    _ANCHOR_KG = {'M20': 2.10, 'M22': 2.55, 'M24': 3.06, 'M27': 3.90, 'M30': 4.80}   # L≈750mm
+    _bolt_qty = {}
+    try:
+        for _e in msp.query('TEXT'):
+            _t = str(_e.dxf.text or '').strip().upper()
+            for _m3 in re.finditer(r'(\d{1,3})\s*(M\d{2,3})', _t):
+                _n3, _g3 = int(_m3.group(1)), _m3.group(2)
+                if 1 <= _n3 <= 200:
+                    _bolt_qty[_g3] = _bolt_qty.get(_g3, 0) + _n3
+    except Exception:
+        _bolt_qty = {}
     for cat, n in counts_only.items():
-        detail.setdefault(cat, {})['（计数）'] = {'数量': n, '重量_t': 0.0, '规格来源': '按个计'}
+        _tbl = _ANCHOR_KG if '锚' in cat else _BOLT_KG
+        _kg, _detail_spec = 0.0, {}
+        for _g, _q in _bolt_qty.items():
+            _u = _tbl.get(_g)
+            if _u:
+                _kg += _u * _q
+                _detail_spec[_g] = _q
+        if _kg > 0:
+            _src = '图内规格(nMm)'
+        else:                                   # 无规格文字 → 类别默认单重（不冒充图内规格）
+            _kg = (3.06 if '锚' in cat else 0.36) * n
+            _src = '默认单重(图内无规格文字)'
+        detail.setdefault(cat, {})['（计数·算重）'] = {
+            '数量': n, '重量_t': round(_kg / 1000.0, 4),
+            '规格来源': _src, '规格明细': _detail_spec}
+        summary['总重_t'] += _kg / 1000.0
     summary['总重_t'] = round(summary['总重_t'], 3)
     summary['长度合计_m'] = round(summary['长度合计_m'], 1)
     return detail, summary

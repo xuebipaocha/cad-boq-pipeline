@@ -150,12 +150,20 @@ def collect_closed_polys(msp, insunits=4, min_area_m2=1.0, near_close_tol=0.01):
             n = len(pts)
             perim = sum(((pts[(j + 1) % n][0] - pts[j][0]) ** 2 +
                          (pts[(j + 1) % n][1] - pts[j][1]) ** 2) ** 0.5 for j in range(n))
+            # v6.10.14 补**中心点 cx/cy**（图名分区取面积用）：闭合区顶点的算术平均。
+            # ⚠ 保持**原始图单位(mm)**，因为图名锚点来自 `全图文字` 的 x/y（同为 mm）——
+            # 若换算成 m 会与图名锚点不同单位，导致就近归属比较失效（实测 261012 曾因此
+            # 使分区过滤走"保底全保留"分支，面积取不到平面图区的真实值）。
+            _cx = sum(p[0] for p in pts) / n
+            _cy = sum(p[1] for p in pts) / n
             out.append({
                 'layer': e.dxf.layer,
                 'area_m2': round(area_m2, 1),
                 'perimeter_m': round(length_to_m(perim, insunits), 1),
                 'vertices': n,
                 'insunits': insunits,
+                'cx': round(_cx, 1),
+                'cy': round(_cy, 1),
             })
     except Exception:
         pass

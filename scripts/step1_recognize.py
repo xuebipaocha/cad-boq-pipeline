@@ -526,6 +526,14 @@ def choose_area(result, insunits=4):
             if poly_best2 > 0 and area != poly_best2:
                 notes.append(f'已回退: 采用几何闭合轮廓{poly_best2:.0f}m² (弃用图签污染值{area:.0f}m²)')
                 area, source = poly_best2, '闭合多段线(交叉验证回退)'
+    # v6.10.14 保留原始候选（含 cx/cy），供 step1 在 `全图文字` 就绪后做图名分区重算
+    try:
+        result['_area_candidates'] = polys   # v6.10.14 用**过滤前**原始候选：
+        # `is_frame_poly`(v4.3 图框排除) 会把图层 PUB_TITLE(图签层) 上的**真实建筑外轮廓**
+        # 一并当图框排除（实测 261012：真实 2494.8 m² 被误杀，只剩 516.6 m²）。
+        # 故此处保存未过滤候选，供"图名分区"按平面图区就近归属后再取最大轮廓。
+    except Exception:
+        pass
     return area, source, notes
 
 
@@ -570,6 +578,7 @@ def run(dwg_file, output_dir):
 
     qty = result.get('quantity',{})
     insunits = result.get('metadata', {}).get('insunits', 4)
+    _area_result_ref = result
     total_area, area_source, area_notes = choose_area(result, insunits)
     # 周长优先取非图框层的最大闭合多段线(v5.0: 与面积裁决同用 is_frame_poly,
     # 修复 0 层图框未被周长排除的疏漏 — 墙长/房间周长以主区域轮廓为准)
@@ -804,6 +813,38 @@ def run(dwg_file, output_dir):
     # v6.10.7 全量看图: 汇总所有文字源(TEXT/MTEXT/标注/块内/属性/嵌套块) —— 零遗漏
     try:
         pid['全图文字'] = _collect_all_texts(_msp)
+        # v6.10.14 **图名分区面积重算**：choose_area 调用时 `全图文字` 尚未生成（527 < 806），
+        # 故分区锚点为空、退化为保底。此处用刚拿到的 `全图文字`（含 x/y, 单位 mm）作锚点，
+        # 把候选闭合区按就近归属到"平面图/布置图"区 → 取该区最大轮廓（排除详图/图框区巨值）。
+        try:
+            _cands = (_area_result_ref or {}).get('_area_candidates') or []
+            _anchors = []
+            for _t in (pid.get('全图文字') or []):
+                _s2 = str(_t.get('文本') or '')
+                if ('平面图' in _s2 or '布置图' in _s2) and len(_s2) < 30:
+                    _tx, _ty = _t.get('x'), _t.get('y')
+                    if _tx is not None and _ty is not None:
+                        _anchors.append((_s2, float(_tx), float(_ty)))
+            if _cands and _anchors:
+                _keep = []
+                for _p in _cands:
+                    _pcx, _pcy = _p.get('cx'), _p.get('cy')
+                    if _pcx is None or _pcy is None:
+                        continue
+                    _bd = min((float(_pcx) - _ax) ** 2 + (float(_pcy) - _ay) ** 2
+                              for _, _ax, _ay in _anchors)
+                    if _bd <= (20000.0 ** 2):          # 20 m 内视为归属某一"平面图"区
+                        _keep.append(_p)
+                if _keep:
+                    _best = max((p.get('area_m2') or 0) for p in _keep)
+                    _old = pid.get('建筑面积_m2') or 0
+                    if _best > 0 and abs(_best - _old) > 0.5:
+                        print('  面积图名分区重算: %s → %s m² (平面图区 %d 个候选)'
+                              % (_old, round(_best, 2), len(_keep)))
+                        pid['建筑面积_m2'] = round(_best, 2)
+                        pid['面积来源'] = '图名分区(平面图区最大闭合轮廓)'
+        except Exception as _e2:
+            print('  图名分区重算跳过: %s' % _e2)
         print('  全图文字: %d 条(含标注/块内/属性/嵌套块)' % len(pid['全图文字']))
     except Exception as _e_ta:
         print('  ⚠ 全量文字收集失败: %s' % _e_ta)
