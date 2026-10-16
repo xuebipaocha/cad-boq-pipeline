@@ -117,8 +117,33 @@ def _spec_kgm(spec, form):
     return 0.0
 
 
-def extract(msp, tol=3000.0, min_len_mm=500.0):
-    """主入口：返回 (按类别明细, 统计摘要)。"""
+def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
+    """主入口：返回 (按类别明细, 统计摘要)。
+
+    v6.10.10 **图名分区过滤（关键修正）**：实测本图为"图集式多图框"（2-1 钢结构有 59 个图名），
+    其中 `直拉条(ZLT)详图`/`撑杆(CG)详图`/`斜拉条(XLT)详图`/`屋盖檩条详图` 等**详图是放大比例绘制**
+    （1:5~1:20），其线段长度**不等于实际构件长度** —— 早期版本按图层把详图线条也当构件量长度，
+    导致钢量虚高（186.3 t）。现已按图名分区，**排除"详图/大样/节点"区**，只用
+    布置图/平面图/立面图/剖面图区内的几何。
+    """
+    # ⓪ 图名锚点（用于分区；无图名时退化为不分区）
+    titles = []
+    for e in msp.query('TEXT'):
+        try:
+            t = str(e.dxf.text).strip()
+        except Exception:
+            continue
+        if t and len(t) < 30 and re.search(r'(平面图|立面图|剖面图|详图|系统图|布置图|大样)', t):
+            titles.append((t, e.dxf.insert.x, e.dxf.insert.y))
+
+    def _zone(x, y):
+        best, bd = None, 1e18
+        for t, tx, ty in titles:
+            d = (x - tx) ** 2 + (y - ty) ** 2
+            if d < bd:
+                bd, best = d, t
+        return best
+
     # ① 收集含规格的文字（带位置）—— **含块内文字（递归 INSERT）**：
     #    实测主构件 2877m 中 2819m 匹配不到规格，而图纸规格标注大量位于块内/详图中，
     #    只扫 msp 的 TEXT 会漏掉 → 全部退回"默认估算"。
@@ -184,6 +209,12 @@ def extract(msp, tol=3000.0, min_len_mm=500.0):
         if L < min_len_mm:
             continue
         p = _pt(e)
+        # v6.10.10 图名分区过滤：**"详图/大样/节点"区是放大比例绘制**（1:5~1:20），
+        # 其长度不可用于算量 —— 早期未过滤，把详图线条当构件量长度，导致钢量虚高（186.3t）。
+        if exclude_detail and p and titles:
+            _zn = _zone(p[0], p[1])
+            if _zn and re.search(r'(详图|大样|节点)', _zn):
+                continue
         spec = None
         if p:
             best = None
