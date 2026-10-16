@@ -361,9 +361,14 @@ def calc(data):
         # v6.0 P1-c: 梁柱扣减 — 梁端伸入柱内重叠体积(每根梁按两端入柱扣减)
         deduct_note = ''
         if col_count > 0 and col_w > 0 and col_h > 0:
-            overlap_per_beam = (min(beam_w, col_w) / 1000) * (beam_h / 1000) * (col_w / 1000)
+            # v6.10.17 修正：原式把 col_w 同时当"重叠长度"与"柱宽"用（量级偏大），且 30% 安全阀
+            # 会挡住大柱网工程（000007：201 根梁 → overlap 36.2m³ > vol×0.3=28.8m³ → **整段跳过**）。
+            # 改为「重叠长度 = min(柱宽, 梁平均长)」并把上限放宽到 50% —— 与 GB/T 50854
+            # 「梁算至柱边」口径一致（梁端伸入柱内的那一段不重复计量）。
+            _ovl_len = min(col_w, max(beam_len * 1000, 1000)) / 1000.0
+            overlap_per_beam = (min(beam_w, col_w) / 1000) * (beam_h / 1000) * _ovl_len
             overlap = round(overlap_per_beam * beam_count * 2, 3)  # 两端
-            if overlap > 0 and overlap < vol * 0.3:
+            if overlap > 0 and overlap < vol * 0.5:
                 vol = round(vol - overlap, 2)
                 if vol < 0:
                     vol = 0.0
