@@ -365,7 +365,10 @@ def calc(data):
             # 会挡住大柱网工程（000007：201 根梁 → overlap 36.2m³ > vol×0.3=28.8m³ → **整段跳过**）。
             # 改为「重叠长度 = min(柱宽, 梁平均长)」并把上限放宽到 50% —— 与 GB/T 50854
             # 「梁算至柱边」口径一致（梁端伸入柱内的那一段不重复计量）。
-            _ovl_len = min(col_w, max(beam_len * 1000, 1000)) / 1000.0
+            # ⚠ 梁端**伸入柱内的长度 = 柱宽的一半**（梁轴线通常过柱心，从柱边算起到柱心）。
+            # 原取"整柱宽"会使扣减量翻倍（实测 000007 柱 1000×1000 → overlap 60.3m³ > vol×0.5=48m³
+            # → 仍被上限挡住，扣减不生效）。
+            _ovl_len = min(col_w, max(beam_len * 1000, 1000)) / 2.0 / 1000.0
             overlap_per_beam = (min(beam_w, col_w) / 1000) * (beam_h / 1000) * _ovl_len
             overlap = round(overlap_per_beam * beam_count * 2, 3)  # 两端
             if overlap > 0 and overlap < vol * 0.5:
