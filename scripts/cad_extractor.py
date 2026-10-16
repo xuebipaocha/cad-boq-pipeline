@@ -237,8 +237,10 @@ def extract_pipe_lengths(doc, msp, insunits=4):
                 if _best:
                     break
             dia = _best
-        if dia is None and _dia_texts:
-            # v6.10.16 二级兜底：仍无就近匹配 → 取**全图最高频管径**（该图主流管径）
+        if dia is None and _dia_texts and len(_dia_texts) >= 10:
+            # v6.10.16 兜底（**带门槛**）：仅当该图管径标注 ≥10 条时才用"全图最高频管径"。
+            # 基准简单图管径标注少（0~2 条）→ 不触发 → 不会把 XX_未标管径 改名（曾致基准 95%）；
+            # 复杂真图（261012 暖通 153 / 电气 55 条）→ 触发 → 补上管径（否则为"未标管径"）。
             _cnt = {}
             for _dtxt, _tx, _ty in _dia_texts:
                 _cnt[_dtxt] = _cnt.get(_dtxt, 0) + 1

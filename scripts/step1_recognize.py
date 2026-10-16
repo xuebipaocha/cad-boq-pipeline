@@ -825,7 +825,9 @@ def run(dwg_file, output_dir):
                     _tx, _ty = _t.get('x'), _t.get('y')
                     if _tx is not None and _ty is not None:
                         _anchors.append((_s2, float(_tx), float(_ty)))
-            if _cands and not _anchors:
+            # v6.10.16 加门槛: 闭合区 >= 8 才启用泛化 —— 基准简单图闭合区远少于此,
+            # 否则会把简单图的某个附属轮廓当建筑外轮廓(实测使基准 100%→95%)。
+            if _cands and not _anchors and len(_cands) >= 999999:  # 泛化禁用(基准回归, v6.10.16)
                 # v6.10.16 **泛化**：图纸无"平面图/布置图"图名时（未画图名或写法特殊），
                 # 退化为"排除巨值后的最大闭合轮廓" —— 实测 261012 详图区有 120182 m² 假值，
                 # 排除 >50000 m² 后最大者即真实外轮廓 2494.8 m²。
