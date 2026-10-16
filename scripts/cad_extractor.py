@@ -491,6 +491,16 @@ def get_element_sizes(msp):
             result['elements'].append({'layer': lay, 'type': e.dxftype(), 'bounds': bounds})
         except: pass
     
+    # v6.10.18 **线缆型号挂入**安装信息（清单特征/主材价需要规格）。
+    # 实测 5-电气 22 条：VV-1KV 1X16 / NHYJV-3*4 / YJV-0.75KV / NHRVVP-4x1.5
+    try:
+        _ai = result.get('安装信息')
+        if isinstance(_ai, dict) and _cable_specs:
+            _ai['线缆型号'] = [{'规格': _k, '出现次数': _v}
+                              for _k, _v in sorted(_cable_specs.items(),
+                                                   key=lambda x: -x[1])[:12]]
+    except Exception:
+        pass
     return result
 
 
