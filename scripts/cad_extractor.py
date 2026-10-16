@@ -225,14 +225,24 @@ def extract_pipe_lengths(doc, msp, insunits=4):
         m = diameter_pattern.search(lay)
         dia = m.group(0).upper() if m else None
         if dia is None and _dia_texts:
-            # 就近匹配（容差 5 m）：取该层管道代表点附近最近的管径文字
-            _best, _bd = None, 5000.0
-            for _px, _py in (info.get('pts') or []):
-                for _dtxt, _tx, _ty in _dia_texts:
-                    _d = ((_px - _tx) ** 2 + (_py - _ty) ** 2) ** 0.5
-                    if _d < _bd:
-                        _bd, _best = _d, _dtxt
+            # v6.10.16 逐级放宽：5m → 30m（实测暖通 153 条 / 电气 55 条管径标注，但距管道 >5m）
+            _best = None
+            for _tol in (5000.0, 30000.0):
+                _bd = _tol
+                for _px, _py in (info.get('pts') or []):
+                    for _dtxt, _tx, _ty in _dia_texts:
+                        _d = ((_px - _tx) ** 2 + (_py - _ty) ** 2) ** 0.5
+                        if _d < _bd:
+                            _bd, _best = _d, _dtxt
+                if _best:
+                    break
             dia = _best
+        if dia is None and _dia_texts:
+            # v6.10.16 二级兜底：仍无就近匹配 → 取**全图最高频管径**（该图主流管径）
+            _cnt = {}
+            for _dtxt, _tx, _ty in _dia_texts:
+                _cnt[_dtxt] = _cnt.get(_dtxt, 0) + 1
+            dia = max(_cnt.items(), key=lambda x: x[1])[0] if _cnt else None
         dia = dia or '未标管径'
         system = '未知系统'
         for kw, sys in system_map.items():
@@ -243,6 +253,23 @@ def extract_pipe_lengths(doc, msp, insunits=4):
             pipes_by_diameter[key] = {'长度_m': 0, '段数': 0, '系统': system, '管径': dia}
         pipes_by_diameter[key]['长度_m'] += info['长度_m']
         pipes_by_diameter[key]['段数'] += info['段数']
+
+    # v6.10.16 **线缆型号细分**：从全图文字提取线缆规格（实测 5-电气有 22 条
+    # VV-1KV 1X16 / NHYJV-3*4 / YJV-0.75KV / NHRVVP-4x1.5）—— 套定额与主材价需要规格。
+    _cable_specs = {}
+    try:
+        _pc = re.compile(r'(NHYJV|WDZN|WDZ|YJV|VV|BV|BYJ|BVR|RVS|KVV|NHRVVP|RVV)\s*[-]?\s*'
+                         r'\d[\w.\-*x×/]*', re.I)
+        for _e in msp.query('TEXT'):
+            _t = str(_e.dxf.text or '').strip()
+            if not _t:
+                continue
+            for _m6 in _pc.finditer(_t):
+                _sp = _m6.group(0).upper().replace(' ', '')
+                if 2 <= len(_sp) <= 24:
+                    _cable_specs[_sp] = _cable_specs.get(_sp, 0) + 1
+    except Exception:
+        _cable_specs = {}
 
     # v5.10: 电气线缆按层归并 (系统=强电/弱电/照明, 供 '安装信息.电缆' 消费)
     elec_by_system = {}

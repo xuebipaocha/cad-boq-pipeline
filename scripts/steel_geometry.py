@@ -271,6 +271,17 @@ def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
     _BOLT_KG = {'M12': 0.13, 'M16': 0.20, 'M20': 0.36, 'M22': 0.48,
                 'M24': 0.60, 'M27': 0.85, 'M30': 1.10}
     _ANCHOR_KG = {'M20': 2.10, 'M22': 2.55, 'M24': 3.06, 'M27': 3.90, 'M30': 4.80}   # L≈750mm
+    # v6.10.16 锚栓**按图内长度精算**：从 'M24×750' / 'M24*750' 提取实际长度(mm)
+    _bolt_len = {}
+    try:
+        for _e in msp.query('TEXT'):
+            _t = str(_e.dxf.text or '').strip().upper()
+            for _m4 in re.finditer(r'(M\d{2,3})\s*[×X*]\s*(\d{2,4})', _t):
+                _g4, _L4 = _m4.group(1), int(_m4.group(2))
+                if 100 <= _L4 <= 3000:
+                    _bolt_len.setdefault(_g4, []).append(_L4)
+    except Exception:
+        _bolt_len = {}
     _bolt_qty = {}
     try:
         for _e in msp.query('TEXT'):
@@ -287,6 +298,15 @@ def extract(msp, tol=3000.0, min_len_mm=500.0, exclude_detail=True):
         for _g, _q in _bolt_qty.items():
             _u = _tbl.get(_g)
             if _u:
+                # v6.10.16 锚栓：若图内给出长度（如 M24×750）→ 按圆钢体积精算（含螺母垫圈 1.15）
+                if '锚' in cat and _g in _bolt_len:
+                    try:
+                        _Ls = _bolt_len[_g]
+                        _Lavg = sum(_Ls) / float(len(_Ls))
+                        _dmm = int(_g[1:])
+                        _u = (3.14159265 * (_dmm ** 2) / 4.0) * _Lavg * 7.85e-9 * 1000.0 * 1.15
+                    except Exception:
+                        pass
                 _kg += _u * _q
                 _detail_spec[_g] = _q
         if _kg > 0:

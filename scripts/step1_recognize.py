@@ -825,6 +825,18 @@ def run(dwg_file, output_dir):
                     _tx, _ty = _t.get('x'), _t.get('y')
                     if _tx is not None and _ty is not None:
                         _anchors.append((_s2, float(_tx), float(_ty)))
+            if _cands and not _anchors:
+                # v6.10.16 **泛化**：图纸无"平面图/布置图"图名时（未画图名或写法特殊），
+                # 退化为"排除巨值后的最大闭合轮廓" —— 实测 261012 详图区有 120182 m² 假值，
+                # 排除 >50000 m² 后最大者即真实外轮廓 2494.8 m²。
+                _ok = [p for p in _cands if (p.get('area_m2') or 0) <= 50000.0]
+                if _ok:
+                    _bestA = max((p.get('area_m2') or 0) for p in _ok)
+                    _oldA = pid.get('建筑面积_m2') or 0
+                    if _bestA > 0 and abs(_bestA - _oldA) > 0.5:
+                        print('  面积泛化重算(无图名): %s → %s m²' % (_oldA, round(_bestA, 2)))
+                        pid['建筑面积_m2'] = round(_bestA, 2)
+                        pid['面积来源'] = '泛化(排除巨值后最大轮廓)'
             if _cands and _anchors:
                 _keep = []
                 for _p in _cands:
