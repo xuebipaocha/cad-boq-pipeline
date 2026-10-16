@@ -1123,6 +1123,19 @@ def run(dwg_file, output_dir):
         mems = extract_steel_from_texts(steel_texts)
         pid['钢结构'] = {'构件': mems}
         if mems: print(f'  钢结构: 识别{len(mems)}个构件')
+        # v6.10.9 **几何提取**（关键补充）：文字规格法只能认出少量构件（实测 12 件 / 1.68 t），
+        # 而钢构件真实几何在图内线段上（实测 LINE 12954 / 拉杆 7402 / 檩条最长 43.2m）。
+        # 按图层语义 + 线段几何提取 → 分类明细（实测 827 件 / 186.3 t）。
+        if _msp is not None:
+            try:
+                from steel_geometry import extract as _sg_extract
+                _d, _sm = _sg_extract(_msp)
+                if _sm.get('构件数'):
+                    pid['钢构件几何'] = {'明细': _d, '汇总': _sm}
+                    print('  钢构件几何提取: %d 件 / %.1f t / %.0f m' % (
+                        _sm['构件数'], _sm['总重_t'], _sm['长度合计_m']))
+            except Exception as _e:
+                print('  钢构件几何提取跳过: %s' % _e)
 
     # ── 标高参数写入: 挖深/层高 供算量层使用 ──
     if pid.get('标高参数'):

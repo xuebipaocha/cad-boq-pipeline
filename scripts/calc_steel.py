@@ -8,6 +8,30 @@ def calc(data):
     from quality import SRC_MEASURED, SRC_TEXT, SRC_ESTIMATED, SRC_PENDING
     r = []
     steel_info = data.get('钢结构', {})
+
+    # v6.10.9 优先：**几何提取**结果（按图层语义 + 线段几何，实测 827 件 / 186.3 t）
+    # —— 文字规格法易漏（实测仅 12 件 / 1.68 t），故几何法优先、文字法兜底。
+    _geo = (data.get('钢构件几何') or {}).get('明细') or {}
+    if _geo:
+        for _cat, _specs in _geo.items():
+            for _spec, _v in _specs.items():
+                _wt = _v.get('重量_t') or 0
+                _cnt = _v.get('数量') or 0
+                if _wt <= 0 and _cnt <= 0:
+                    continue
+                _src = SRC_TEXT if _v.get('规格来源') == '图示规格' else SRC_ESTIMATED
+                if _wt > 0:
+                    r.append({'分项名称': '%s %s 制作安装' % (_cat, str(_spec)[:24]), '单位': 't',
+                              '工程量': round(_wt, 3),
+                              '计算式': '长%.1fm × %.2fkg/m ÷1000 [%s]' % (
+                                  _v.get('长度_m', 0), _v.get('单重_kg_m', 0), _v.get('规格来源', '')),
+                              '定额编号': '6-6', '数据来源': _src})
+                elif _cnt > 0:
+                    r.append({'分项名称': '%s（按个计）' % _cat, '单位': '个',
+                              '工程量': _cnt, '计算式': '几何计数 [按个计]',
+                              '定额编号': '', '数据来源': SRC_MEASURED})
+        if r:
+            return r
     
     # 1. 从识图结果读取构件
     members = steel_info.get('构件', [])
