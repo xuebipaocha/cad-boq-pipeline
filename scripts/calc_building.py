@@ -131,7 +131,7 @@ def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0, views=None)
         if total > 0:
             # 参考法: 含钢量(kg/m² 说明值或 65 默认)
             tc = ' '.join(texts)
-            m = re.search(r'(\d+\.?\d*)\s*kg/[m㎡]', tc)
+            m = re.search(r'(\d+\.?\d*)\s*kg/(?:m²|m2|㎡)', tc)
             ref_kg = float(m.group(1)) if m else 65
             ref = round(bfa * ref_kg / 1000, 2)
             note = f'平法结构化解析: {detail}'
@@ -150,7 +150,7 @@ def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0, views=None)
         ratio = float(m.group(1)) / 100
         steel_t = ratio * con_vol_total * 7.85
         return round(steel_t, 2), f'按配筋率{ratio*100}%×全构件混凝土体积{con_vol_total:.1f}m³计算'
-    m = re.search(r'(\d+\.?\d*)\s*kg/[m㎡]', tc)
+    m = re.search(r'(\d+\.?\d*)\s*kg/(?:m²|m2|㎡)', tc)
     if m:
         kg_m2 = float(m.group(1))
         return round(bfa*kg_m2/1000, 2), f'按含钢量{kg_m2}kg/m²'
