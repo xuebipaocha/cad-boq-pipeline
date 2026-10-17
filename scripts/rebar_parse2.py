@@ -345,6 +345,11 @@ def parse_rebar_by_view(texts_with_coord, dx=20000.0, dy=30000.0):
         if not isinstance(it, dict):
             continue
         t = _n(it.get('文本', '')).strip()
+        # v6.10.21 **AutoCAD 钢筋符号 `%%` 编码归一**（实测 261012 配筋写作 `%%1328@100`）：
+        #   %%c/%%C=Φ(直径) ; %%130=HPB300 ; %%131=HRB335 ; %%132=HRB400(三级钢)
+        # 此步必须在正则匹配之前，否则 `%%1328@100` 永远识别不到 → 配筋全丢 → 只能估算。
+        t = _re.sub(r'%%1(3[012])', 'Φ', t, flags=_re.I)
+        t = _re.sub(r'%%[cC]', 'Φ', t)
         if t:
             items.append((t, float(it.get('x') or 0), float(it.get('y') or 0)))
     # 图名锚点(配筋图/平面图/详图)
@@ -354,7 +359,7 @@ def parse_rebar_by_view(texts_with_coord, dx=20000.0, dy=30000.0):
     for t, ax, ay in anchors:
         zone = [(tt, x, y) for tt, x, y in items if abs(x - ax) <= dx and abs(y - ay) <= dy]
         mem = [{'标注': tt, 'x': x, 'y': y} for tt, x, y in zone
-               if _re.search(r'(KL|WKL|LL|L\d+\s*\(|KZ|GZ|LZ)', tt)]
+               if _re.search(r'(KL|WKL|LL|L\d+\s*\(|KZ|GZ|LZ|DZ|DL|JZL|CT|BMZ|基础|地梁|构造柱)', tt)]
         stir = [tt for tt, x, y in zone if _re.search(r'Φ\s*\d+\s*@', tt)]
         main = [tt for tt, x, y in zone if _re.search(r'\d+\s*Φ\s*\d+', tt)]
         # 配对: 每个构件标注 → 取其**邻近**(±8m)的箍筋/主筋
@@ -445,9 +450,9 @@ def build_parsed_from_views(views):
             main_ = ';'.join(_bars[:2]) + ((' ' + ' '.join(_cons[:2])) if _cons else '')
             line = ('%s %s %s' % (ann, stir, main_)).strip()
             try:
-                if _re.search(r'(KL|WKL|LL|L\d+\s*\()', ann):
+                if _re.search(r'(KL|WKL|LL|L\d+\s*\(|DL|JZL|过梁|地梁|基础梁)', ann):
                     beams.append(BeamRebar(line).parse())
-                elif _re.search(r'(KZ|GZ|LZ)', ann):
+                elif _re.search(r'(KZ|GZ|LZ|DZ|构造柱|短柱)', ann):
                     columns.append(ColumnRebar(line).parse())
                 elif _re.search(r'(板|LB)', ann):
                     slabs.append(SlabRebar(line).parse())
