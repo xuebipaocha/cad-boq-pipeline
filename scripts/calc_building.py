@@ -144,17 +144,11 @@ def _parse_rebar(texts, bfa, con_vol_total, col_h=3.0, beam_len=6.0, views=None)
     total, note, detail = calc_rebar_total(texts, bfa)
     if total:
         return total, note
-    tc = ' '.join(texts)
-    m = re.search(r'配筋率[：:]?\s*(\d+\.?\d*)\s*%', tc)
-    if m and con_vol_total > 0:
-        ratio = float(m.group(1)) / 100
-        steel_t = ratio * con_vol_total * 7.85
-        return round(steel_t, 2), f'按配筋率{ratio*100}%×全构件混凝土体积{con_vol_total:.1f}m³计算'
-    m = re.search(r'(\d+\.?\d*)\s*kg/(?:m²|m2|㎡)', tc)
-    if m:
-        kg_m2 = float(m.group(1))
-        return round(bfa*kg_m2/1000, 2), f'按含钢量{kg_m2}kg/m²'
-    return round(bfa*65/1000, 2), f'面积×65kg/m²含钢量（估算）'
+    # v6.10.23 **落实 PRINCIPLES 第⑥条「无证据不编造」**
+    # （用户 2026-10-16："估算我用你啊？图纸中明明有配筋图，明明可以精算，为什么要估算"）
+    # 原兜底链（配筋率 / 说明含钢量 / 默认 65kg/m²）全是无配筋证据时的**估算** → 一律移除。
+    # 改为 量=0 + "待提取"，由 step3 分流进待提取清单（保留分项名，不以估算冒充实测）。
+    return 0.0, '无配筋证据（平法标注/配筋表缺失）→ 待提取，不做含钢量估算'
 
 def _parse_decoration(texts, bfa, total_area):
     """装饰做法: 地面系数/墙面系数"""

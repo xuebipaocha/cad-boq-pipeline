@@ -281,7 +281,7 @@ def _apply_scope_mask(drawing_data, results):
     return results
 
 
-def calculate(drawing_data):
+def _calculate_impl(drawing_data):
     specialty = drawing_data.get('专业类型', '房屋建筑与装饰工程')
     # v5.4 D6: 大修/改造 + 房建 → 专用计算器, 跳过规则引擎与新建模板
     # (规则引擎是"关键词驱动"的新建分项, 大修图纸会误触发土方/场地平整等)
@@ -687,3 +687,17 @@ if __name__ == '__main__':
         print(f'\n{sp}:')
         for item in calculate(test):
             print(f'  {item["分项名称"]}: {item["工程量"]} {item["单位"]} ({item.get("_engine","")})')
+
+
+# v6.10.23 **六步范式自检包装**（PRINCIPLES.md 通用算量范式）
+# —— 每次算量结束自动核对六步并打印，防止"改了局部 bug、整体却偏离原则"（用户 2026-10-16 批评）。
+def calculate(drawing_data):
+    r = _calculate_impl(drawing_data)
+    try:
+        import calc_selfcheck as _sc
+        _checks = _sc.run(drawing_data, r)
+        drawing_data['算量自检'] = _checks
+        print('  ' + _sc.summary(_checks))
+    except Exception as _e:
+        print('  算量自检跳过: %s' % _e)
+    return r
