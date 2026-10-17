@@ -163,9 +163,10 @@ class ColumnRebar:
         if m:
             self.b = int(m.group(1))
             self.h = int(m.group(2))
-        # 纵筋: 12Φ22
-        m = re.search(r'(\d{1,2})\s*[ΦфФφ]\s*(\d{2})', t)
-        if m and int(m.group(1)) >= 4:
+        # 纵筋: 12Φ22 / 构造柱 2Φ14（≥2 即合法；原 ≥4 会滤掉构造柱纵筋）
+        # ⚠ 用负向前瞻排除 `Φ6@500` 这类拉结筋/分布筋（带 @ 的不是纵筋）
+        m = re.search(r'(\d{1,2})\s*[ΦфФφ]\s*(\d{2})(?!\s*@)', t)
+        if m and int(m.group(1)) >= 2:
             self.main_bars = [(int(m.group(1)), int(m.group(2)))]
         # 箍筋: Φ8@100
         m = re.search(r'[ΦфФφ]\s*(\d+)\s*@\s*(\d+)', t)
@@ -359,7 +360,8 @@ def parse_rebar_by_view(texts_with_coord, dx=20000.0, dy=30000.0):
     for t, ax, ay in anchors:
         zone = [(tt, x, y) for tt, x, y in items if abs(x - ax) <= dx and abs(y - ay) <= dy]
         mem = [{'标注': tt, 'x': x, 'y': y} for tt, x, y in zone
-               if _re.search(r'(KL|WKL|LL|L\d+\s*\(|KZ|GZ|LZ|DZ|DL|JZL|CT|BMZ|基础|地梁|构造柱)', tt)]
+               if _re.search(r'(KL|WKL|LL|L\d+\s*\(|KZ|GZ|LZ|DZ|DL|JZL|CT|BMZ)\s*-?\s*\d', tt)
+               and len(tt) <= 24]
         stir = [tt for tt, x, y in zone if _re.search(r'Φ\s*\d+\s*@', tt)]
         main = [tt for tt, x, y in zone if _re.search(r'\d+\s*Φ\s*\d+', tt)]
         # 配对: 每个构件标注 → 取其**邻近**(±8m)的箍筋/主筋
